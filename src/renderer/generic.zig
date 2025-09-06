@@ -153,6 +153,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// cells for the draw call.
         cells_rebuilt: bool = false,
 
+        /// Cache hit and miss counters for font shaper cache, reset per frame.
+        cache_hits: u32 = 0,
+        cache_misses: u32 = 0,
+
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
 
@@ -2314,6 +2318,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.draw_mutex.lock();
             defer self.draw_mutex.unlock();
 
+            // Reset cache counters for this frame
+            self.cache_hits = 0;
+            self.cache_misses = 0;
+
             // const start = try std.time.Instant.now();
             // const start_micro = std.time.microTimestamp();
             // defer {
@@ -2501,10 +2509,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         const run = shaper_run orelse break :preedit;
 
                         // If we haven't shaped this run, do so now.
-                        shaper_cells = shaper_cells orelse
-                            // Try to read the cells from the shaping cache if we can.
-                            self.font_shaper_cache.get(run) orelse
-                            cache: {
+                        if (self.font_shaper_cache.get(run)) |cached| {
+                            self.cache_hits += 1;
+                            shaper_cells = cached;
+                        } else {
+                            self.cache_misses += 1;
+                            shaper_cells = shaper_cells orelse cache: {
                                 // Otherwise we have to shape them.
                                 const cells = try self.font_shaper.shape(run);
 
@@ -2527,6 +2537,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                                 // we can safely use them.
                                 break :cache cells;
                             };
+                        }
 
                         // Advance our index until we reach or pass
                         // our current x position in the shaper cells.
@@ -2733,10 +2744,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                     if (shaper_run) |run| glyphs: {
                         // If we haven't shaped this run yet, do so.
-                        shaper_cells = shaper_cells orelse
-                            // Try to read the cells from the shaping cache if we can.
-                            self.font_shaper_cache.get(run) orelse
-                            cache: {
+                        if (self.font_shaper_cache.get(run)) |cached| {
+                            self.cache_hits += 1;
+                            shaper_cells = cached;
+                        } else {
+                            self.cache_misses += 1;
+                            shaper_cells = shaper_cells orelse cache: {
                                 // Otherwise we have to shape them.
                                 const cells = try self.font_shaper.shape(run);
 
@@ -2759,6 +2772,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                                 // we can safely use them.
                                 break :cache cells;
                             };
+                        }
 
                         const cells = shaper_cells orelse break :glyphs;
 
@@ -2932,6 +2946,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.cells_rebuilt = true;
 
             // Log some things
+            // Log total cache hits and misses for this frame
+            if (self.cache_hits > 0 or self.cache_misses > 0) {
+                log.info("font shaper cache: hits={}, misses={}", .{self.cache_hits, self.cache_misses});
+            }
+
             // log.debug("rebuildCells complete cached_runs={}", .{
             //     self.font_shaper_cache.count(),
             // });

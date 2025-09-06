@@ -40,7 +40,8 @@ const CellCacheTable = CacheTable(
     //
     // I'd expect then an average of 256 frequently cached runs is a
     // safe guess most terminal screens.
-    256,
+    // A conservative bump to 512 for position-independent cache runs.
+    512,
     // 8 items per bucket to give decent resilliency to important runs.
     8,
 );

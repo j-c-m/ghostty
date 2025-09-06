@@ -2948,7 +2948,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Log some things
             // Log total cache hits and misses for this frame
             if (self.cache_hits > 0 or self.cache_misses > 0) {
-                log.info("font shaper cache: hits={}, misses={}", .{self.cache_hits, self.cache_misses});
+                log.info("font shaper cache: hits={}, misses={}", .{ self.cache_hits, self.cache_misses });
             }
 
             // log.debug("rebuildCells complete cached_runs={}", .{

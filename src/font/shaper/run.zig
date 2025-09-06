@@ -140,6 +140,17 @@ pub const RunIterator = struct {
                     }
                 }
 
+                // Experimental "word" splitting
+                if (prev_cell.content_tag == .codepoint and
+                    cell.content_tag == .codepoint)
+                {
+                    const prev_cp = prev_cell.codepoint();
+                    const cp = cell.codepoint();
+
+                    // Break if transitioning out of/in to an alphanumeric "word"
+                    if (isAlnum(prev_cp) != isAlnum(cp)) break;
+                }
+
                 // If the style is exactly the change then fast path out.
                 if (prev_cell.style_id == cell.style_id) break :style;
 
@@ -271,11 +282,7 @@ pub const RunIterator = struct {
             }
 
             // Add all the codepoints for our grapheme
-            try self.addCodepoint(
-                &hasher,
-                if (cell.codepoint() == 0) ' ' else cell.codepoint(),
-                relative_cluster
-            );
+            try self.addCodepoint(&hasher, if (cell.codepoint() == 0) ' ' else cell.codepoint(), relative_cluster);
             if (cell.hasGrapheme()) {
                 const cps = self.opts.row.grapheme(cell).?;
                 for (cps) |cp| {
@@ -395,6 +402,10 @@ pub const RunIterator = struct {
         return null;
     }
 };
+
+fn isAlnum(cp: u32) bool {
+    return (cp >= 'a' and cp <= 'z') or (cp >= 'A' and cp <= 'Z') or (cp >= '0' and cp <= '9');
+}
 
 /// Returns a style that when compared must be identical for a run to
 /// continue.

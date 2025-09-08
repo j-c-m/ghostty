@@ -39,6 +39,12 @@ const log = std.log.scoped(.font_shared_grid);
 /// Cache for codepoints to font indexes in a group.
 codepoints: std.AutoHashMapUnmanaged(CodepointKey, ?Collection.Index) = .{},
 
+/// Fast cache for ASCII codepoints (0-127) with null presentation.
+codepoints_fast: [128][4]?Collection.Index.IndexInt = std.mem.zeroes([128][4]?Collection.Index.IndexInt),
+
+/// Fast cache for glyphs (0-2047) with default render options.
+glyphs_fast: [2048][4]?Render = std.mem.zeroes([2048][4]?Render),
+
 /// Cache for glyph renders into the atlas.
 glyphs: std.HashMapUnmanaged(GlyphKey, Render, GlyphKey.Context, 80) = .{},
 
@@ -150,6 +156,14 @@ pub fn getIndex(
     {
         self.lock.lockShared();
         defer self.lock.unlockShared();
+        // Check fast cache for null presentation
+        if (key.presentation == null and key.codepoint < 128) {
+            if (self.codepoints_fast[key.codepoint][@intFromEnum(key.style)]) |idx_int| {
+                //log.info("codepoint fast cache hit for cp={}, style={}", .{key.codepoint, key.style});
+                return .{ .idx = idx_int, .style = key.style };
+            }
+        }
+        // Fall back to hashmap
         if (self.codepoints.get(key)) |v| return v;
     }
 
@@ -165,6 +179,13 @@ pub fn getIndex(
     // Load a value and cache it. This even caches negative matches.
     const value = self.resolver.getIndex(alloc, cp, style, p);
     gop.value_ptr.* = value;
+
+    // Cache in fast cache if applicable
+    if (value) |idx| {
+        if (key.presentation == null and key.codepoint < 128) {
+            self.codepoints_fast[key.codepoint][@intFromEnum(key.style)] = idx.idx;
+        }
+    }
 
     if (value) |idx| preload: {
         // If the font is a sprite font then we don't need to preload
@@ -248,6 +269,18 @@ pub fn renderGlyph(
     {
         self.lock.lockShared();
         defer self.lock.unlockShared();
+        // Check fast cache for default options and known index
+        if (glyph_index < 2048 and
+            key.opts.thicken == false and
+            key.opts.cell_width == 1 and
+            key.opts.constraint.doesAnything() == false) {
+            if (self.glyphs_fast[glyph_index][@intFromEnum(key.index.style)]) |render| {
+                //log.info("glyphs_fast hit for glyph_index={}, style={}", .{glyph_index, key.index.style});
+                return render;
+            }
+        }
+        //log.info("glyphs_fast miss for glyph_index={}, style={}", .{glyph_index, key.index.style});
+        // Fallback to hashmap
         if (self.glyphs.get(key)) |v| return v;
     }
 
@@ -315,6 +348,15 @@ pub fn renderGlyph(
         .glyph = glyph,
         .presentation = p,
     };
+
+    // Cache in fast cache if applicable (default options)
+    if (glyph_index < 2048 and
+        key.opts.thicken == false and
+        key.opts.cell_width == 1 and
+        key.opts.constraint.doesAnything() == false) {
+        //log.info("Caching glyphs_fast for glyph_index={}, style={}", .{glyph_index, key.index.style});
+        self.glyphs_fast[glyph_index][@intFromEnum(key.index.style)] = gop.value_ptr.*;
+    }
 
     return gop.value_ptr.*;
 }

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<dictionary title="Ghostty Terminology">
+  <suite name="Ghostty Suite" code="Ghst" description="Commands and objects for Ghostty">
+    <class name="application" code="capp" description="The Ghostty application">
+      <cocoa class="NSApplication"/>
+      <property name="name" code="pnam" type="text" access="r" description="The name of the application"/>
+    </class>
+
+    <class name="window" code="cwin" description="A Ghostty window">
+      <cocoa class="GhosttyWindow"/>
+      <property name="id" code="ID  " type="integer" access="r" description="Unique ID of the window"/>
+      <property name="name" code="pnam" type="text" access="r" description="Name of the window"/>
+    </class>
+
+    <command name="new window" code="GhstNwin" description="Create a new window">
+      <cocoa class="Ghostty.ScriptNewWindowCommand"/>
+      <parameter name="with properties" code="prdt" type="record" optional="yes" description="Properties for the new window"/>
+    </command>
+    <command name="new tab" code="GhstNtab" description="Create a new tab">
+      <cocoa class="Ghostty.ScriptNewTabCommand"/>
+      <parameter name="with properties" code="prdt" type="record" optional="yes" description="Properties for the new tab"/>
+    </command>
+  </suite>
+</dictionary>

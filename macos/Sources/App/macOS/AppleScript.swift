@@ -1,12 +1,19 @@
 import Foundation
 import Cocoa
 
+
 @objc(GhosttyScriptNewWindowCommand)
 class ScriptNewWindowCommand: NSScriptCommand {
     override func performDefaultImplementation() -> Any? {
         print("ScriptNewWindowCommand called")
         if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
-            _ = TerminalController.newWindow(appDelegate.ghostty)
+            var config: Ghostty.SurfaceConfiguration? = nil
+            if let command = evaluatedArguments?["command"] as? String {
+                config = Ghostty.SurfaceConfiguration()
+                config?.command = command
+                config?.waitAfterCommand = false
+            }
+            _ = TerminalController.newWindow(appDelegate.ghostty, withBaseConfig: config)
         }
         return nil
     }
@@ -17,10 +24,16 @@ class ScriptNewTabCommand: NSScriptCommand {
     override func performDefaultImplementation() -> Any? {
         print("ScriptNewTabCommand called")
         if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
+            var config: Ghostty.SurfaceConfiguration? = nil
+            if let command = evaluatedArguments?["command"] as? String {
+                config = Ghostty.SurfaceConfiguration()
+                config?.command = command
+                config?.waitAfterCommand = false
+            }
             _ = TerminalController.newTab(
                 appDelegate.ghostty,
                 from: TerminalController.preferredParent?.window,
-                withBaseConfig: nil
+                withBaseConfig: config
             )
         }
         return nil

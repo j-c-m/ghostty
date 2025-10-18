@@ -3,6 +3,12 @@
 <dictionary title="Ghostty Terminology">
   <suite name="Standard Suite" code="????"
     description="Common classes and commands for all applications.">
+    <enumeration name="save options" code="savo">
+      <enumerator name="yes" code="yes " description="Save the file." />
+      <enumerator name="no" code="no  " description="Do not save the file." />
+      <enumerator name="ask" code="ask "
+        description="Ask the user whether or not to save the file." />
+    </enumeration>
     <command name="quit" code="aevtquit" description="Quit the application.">
       <cocoa class="NSQuitCommand" />
       <parameter name="saving" code="savo" type="save options" optional="yes"
@@ -114,13 +120,15 @@
   <suite name="Ghostty Suite" code="Ghst" description="Commands and objects for Ghostty">
     <command name="create window" code="GhstNwin" description="Create a new window">
       <cocoa class="Ghostty.ScriptNewWindowCommand" />
-      <parameter name="with properties" code="prdt" type="record" optional="yes"
-        description="Properties for the new window" />
+      <parameter name="command" code="cmd " type="text" optional="yes"
+        description="The shell command to execute in the new window" />
     </command>
     <command name="create tab" code="GhstNtab" description="Create a new tab">
       <cocoa class="Ghostty.ScriptNewTabCommand" />
-      <parameter name="with properties" code="prdt" type="record" optional="yes"
-        description="Properties for the new tab" />
+      <parameter name="command" code="cmd " type="text" optional="yes"
+        description="The shell command to execute in the new tab" />
     </command>
+    <class name="tab" code="Gtab" description="A Ghostty tab">
+    </class>
   </suite>
 </dictionary>

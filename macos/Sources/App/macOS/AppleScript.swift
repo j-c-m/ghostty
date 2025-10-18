@@ -10,8 +10,16 @@ class ScriptNewWindowCommand: NSScriptCommand {
             var config: Ghostty.SurfaceConfiguration? = nil
             if let command = evaluatedArguments?["command"] as? String {
                 config = Ghostty.SurfaceConfiguration()
-                config?.command = command
-                config?.waitAfterCommand = false
+                let wait = evaluatedArguments?["wait"] as? Bool ?? false
+                if wait {
+                    // Use command-based approach (forces waiting)
+                    config?.command = command
+                    config?.waitAfterCommand = true
+                } else {
+                    // Use initialInput approach (no waiting)
+                    config?.initialInput = "\(command); exit\n"
+                    config?.waitAfterCommand = false
+                }
             }
             _ = TerminalController.newWindow(appDelegate.ghostty, withBaseConfig: config)
         }
@@ -27,8 +35,16 @@ class ScriptNewTabCommand: NSScriptCommand {
             var config: Ghostty.SurfaceConfiguration? = nil
             if let command = evaluatedArguments?["command"] as? String {
                 config = Ghostty.SurfaceConfiguration()
-                config?.command = command
-                config?.waitAfterCommand = false
+                let wait = evaluatedArguments?["wait"] as? Bool ?? false
+                if wait {
+                    // Use command-based approach (forces waiting)
+                    config?.command = command
+                    config?.waitAfterCommand = true
+                } else {
+                    // Use initialInput approach (no waiting)
+                    config?.initialInput = "\(command); exit\n"
+                    config?.waitAfterCommand = false
+                }
             }
             _ = TerminalController.newTab(
                 appDelegate.ghostty,

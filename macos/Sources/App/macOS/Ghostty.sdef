@@ -122,11 +122,15 @@
       <cocoa class="Ghostty.ScriptNewWindowCommand" />
       <parameter name="command" code="cmd " type="text" optional="yes"
         description="The shell command to execute in the new window" />
+      <parameter name="wait" code="wait" type="boolean" optional="yes"
+        description="Wait after the command exits" />
     </command>
     <command name="create tab" code="GhstNtab" description="Create a new tab">
       <cocoa class="Ghostty.ScriptNewTabCommand" />
       <parameter name="command" code="cmd " type="text" optional="yes"
         description="The shell command to execute in the new tab" />
+      <parameter name="wait" code="wait" type="boolean" optional="yes"
+        description="Wait after the command exits" />
     </command>
     <class name="tab" code="Gtab" description="A Ghostty tab">
     </class>

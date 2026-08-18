@@ -300,6 +300,7 @@ comptime {
             @export(&c.render_state_row_cells_select, .{ .name = "ghostty_render_state_row_cells_select" });
             @export(&c.render_state_row_cells_get, .{ .name = "ghostty_render_state_row_cells_get" });
             @export(&c.render_state_row_cells_get_multi, .{ .name = "ghostty_render_state_row_cells_get_multi" });
+            @export(&c.render_state_row_cells_collect, .{ .name = "ghostty_render_state_row_cells_collect" });
             @export(&c.render_state_row_cells_free, .{ .name = "ghostty_render_state_row_cells_free" });
             @export(&c.render_state_free, .{ .name = "ghostty_render_state_free" });
         }

@@ -719,6 +719,121 @@ pub fn row_cells_get_multi(
     return .success;
 }
 
+/// C: GhosttyRenderStatePackedCell
+pub const PackedCell = extern struct {
+    cp: u32 = 0,
+    flags: u32 = 0,
+    fg_r: u8 = 0,
+    fg_g: u8 = 0,
+    fg_b: u8 = 0,
+    _pad0: u8 = 0,
+    bg_r: u8 = 0,
+    bg_g: u8 = 0,
+    bg_b: u8 = 0,
+    _pad1: u8 = 0,
+
+    pub const flag_wide_head: u32 = 1 << 0;
+    pub const flag_wide_tail: u32 = 1 << 1;
+    pub const flag_bold: u32 = 1 << 2;
+    pub const flag_italic: u32 = 1 << 3;
+    pub const flag_faint: u32 = 1 << 4;
+    pub const flag_inverse: u32 = 1 << 5;
+    pub const flag_underline: u32 = 1 << 6;
+    pub const flag_has_grapheme: u32 = 1 << 7;
+
+    comptime {
+        std.debug.assert(@sizeOf(@This()) == 16);
+    }
+};
+
+/// Fill `out[0..cap]` from the current row in one C crossing.
+pub fn row_cells_collect(
+    cells_: RowCells,
+    def_fg: ?*const colorpkg.RGB.C,
+    def_bg: ?*const colorpkg.RGB.C,
+    out: ?[*]PackedCell,
+    cap: usize,
+    out_len: ?*usize,
+) callconv(lib.calling_conv) Result {
+    const cells = cells_ orelse return .invalid_value;
+    const dest = out orelse return .invalid_value;
+    const fg0 = if (def_fg) |p| p.* else colorpkg.RGB.C{ .r = 0, .g = 0, .b = 0 };
+    const bg0 = if (def_bg) |p| p.* else colorpkg.RGB.C{ .r = 0, .g = 0, .b = 0 };
+
+    const n = @min(cells.raws.len, cap);
+    var skip_tail = false;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        dest[i] = packCell(cells, i, fg0, bg0, &skip_tail);
+    }
+    const empty = PackedCell{};
+    while (i < cap) : (i += 1) {
+        dest[i] = empty;
+    }
+    if (out_len) |p| p.* = n;
+    return .success;
+}
+
+fn packCell(
+    cells: *const RowCellsWrapper,
+    x: usize,
+    def_fg: colorpkg.RGB.C,
+    def_bg: colorpkg.RGB.C,
+    skip_tail: *bool,
+) PackedCell {
+    const cell = cells.raws[x];
+    var out = PackedCell{};
+
+    if (skip_tail.*) {
+        out.flags |= PackedCell.flag_wide_tail;
+        skip_tail.* = false;
+    } else switch (cell.wide) {
+        .wide => {
+            out.flags |= PackedCell.flag_wide_head;
+            skip_tail.* = true;
+        },
+        .spacer_tail => out.flags |= PackedCell.flag_wide_tail,
+        else => {},
+    }
+
+    const bg_only = cell.content_tag == .bg_color_palette or
+        cell.content_tag == .bg_color_rgb;
+    const cp = cell.codepoint();
+    if (cell.hasText()) {
+        out.cp = cp;
+        if (cell.hasGrapheme()) out.flags |= PackedCell.flag_has_grapheme;
+    }
+
+    var fg = def_fg;
+    var bg_cell = def_bg;
+    var has_bg = false;
+    if (cell.hasStyling() or bg_only) {
+        const s: Style = if (cell.hasStyling()) cells.styles[x] else .{};
+        if (s.fg_color != .none) {
+            fg = s.fg(.{ .default = .{}, .palette = cells.palette }).cval();
+        }
+        if (s.bg(&cell, cells.palette)) |rgb| {
+            bg_cell = rgb.cval();
+            has_bg = true;
+        }
+        if (s.flags.bold) out.flags |= PackedCell.flag_bold;
+        if (s.flags.italic) out.flags |= PackedCell.flag_italic;
+        if (s.flags.faint) out.flags |= PackedCell.flag_faint;
+        if (s.flags.inverse) out.flags |= PackedCell.flag_inverse;
+        if (@intFromEnum(s.flags.underline) != 0) {
+            out.flags |= PackedCell.flag_underline;
+        }
+    }
+    const bg = if (has_bg) bg_cell else def_bg;
+    out.fg_r = fg.r;
+    out.fg_g = fg.g;
+    out.fg_b = fg.b;
+    out.bg_r = bg.r;
+    out.bg_g = bg.g;
+    out.bg_b = bg.b;
+    return out;
+}
+
 inline fn rowCellsGetDispatch(
     cells: *const RowCellsWrapper,
     x: usize,
@@ -2567,4 +2682,206 @@ test "render: row_cells_get_multi null returns invalid_value" {
     var raw: row.CRow = undefined;
     var values = [_]?*anyopaque{@ptrCast(&raw)};
     try testing.expectEqual(Result.invalid_value, row_cells_get_multi(null, 1, null, &values, null));
+}
+
+const CollectRow = struct {
+    state: RenderState,
+    it: RowIterator,
+    cells: RowCells,
+    len: usize,
+
+    fn deinit(self: CollectRow) void {
+        row_cells_free(self.cells);
+        row_iterator_free(self.it);
+        free(self.state);
+    }
+};
+
+fn collectFirstRow(
+    terminal: terminal_c.Terminal,
+    def_fg: colorpkg.RGB.C,
+    def_bg: colorpkg.RGB.C,
+    out: []PackedCell,
+) !CollectRow {
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    errdefer free(state);
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var it: RowIterator = null;
+    try testing.expectEqual(Result.success, row_iterator_new(
+        &lib.alloc.test_allocator,
+        &it,
+    ));
+    errdefer row_iterator_free(it);
+    try testing.expectEqual(Result.success, get(state, .row_iterator, @ptrCast(&it)));
+    try testing.expect(row_iterator_next(it));
+
+    var cells: RowCells = null;
+    try testing.expectEqual(Result.success, row_cells_new(
+        &lib.alloc.test_allocator,
+        &cells,
+    ));
+    errdefer row_cells_free(cells);
+    try testing.expectEqual(Result.success, row_get(it, .cells, @ptrCast(&cells)));
+
+    var len: usize = 0;
+    try testing.expectEqual(Result.success, row_cells_collect(
+        cells,
+        &def_fg,
+        &def_bg,
+        out.ptr,
+        out.len,
+        &len,
+    ));
+    return .{ .state = state, .it = it, .cells = cells, .len = len };
+}
+
+test "render: row cells collect invalid_value" {
+    var buf: [1]PackedCell = undefined;
+    var len: usize = 99;
+    try testing.expectEqual(Result.invalid_value, row_cells_collect(
+        null,
+        null,
+        null,
+        &buf,
+        buf.len,
+        &len,
+    ));
+    try testing.expectEqual(Result.invalid_value, row_cells_collect(
+        @ptrFromInt(@alignOf(RowCellsWrapper)),
+        null,
+        null,
+        null,
+        buf.len,
+        &len,
+    ));
+}
+
+test "render: row cells collect empty uses defaults" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        4,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    const def_fg: colorpkg.RGB.C = .{ .r = 1, .g = 2, .b = 3 };
+    const def_bg: colorpkg.RGB.C = .{ .r = 4, .g = 5, .b = 6 };
+    var buf: [6]PackedCell = undefined;
+    const got = try collectFirstRow(terminal, def_fg, def_bg, &buf);
+    defer got.deinit();
+
+    try testing.expectEqual(@as(usize, 4), got.len);
+    try testing.expectEqual(@as(u32, 0), buf[0].cp);
+    try testing.expectEqual(@as(u32, 0), buf[0].flags);
+    try testing.expectEqual(def_fg.r, buf[0].fg_r);
+    try testing.expectEqual(def_fg.g, buf[0].fg_g);
+    try testing.expectEqual(def_fg.b, buf[0].fg_b);
+    try testing.expectEqual(def_bg.r, buf[0].bg_r);
+    try testing.expectEqual(@as(u32, 0), buf[4].cp);
+    try testing.expectEqual(@as(u32, 0), buf[5].flags);
+}
+
+test "render: row cells collect inverse is flag only" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        10,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    const input = "\x1b[38;2;10;20;30m\x1b[7mA";
+    terminal_c.vt_write(terminal, input, input.len);
+
+    const def_fg: colorpkg.RGB.C = .{ .r = 255, .g = 255, .b = 255 };
+    const def_bg: colorpkg.RGB.C = .{ .r = 0, .g = 0, .b = 0 };
+    var buf: [10]PackedCell = undefined;
+    const got = try collectFirstRow(terminal, def_fg, def_bg, &buf);
+    defer got.deinit();
+    try testing.expectEqual(@as(usize, 10), got.len);
+
+    try testing.expectEqual(@as(u32, 'A'), buf[0].cp);
+    try testing.expect(buf[0].flags & PackedCell.flag_inverse != 0);
+    try testing.expectEqual(@as(u8, 10), buf[0].fg_r);
+    try testing.expectEqual(@as(u8, 20), buf[0].fg_g);
+    try testing.expectEqual(@as(u8, 30), buf[0].fg_b);
+
+    try testing.expectEqual(Result.success, row_cells_select(got.cells, 0));
+    var fg: colorpkg.RGB.C = undefined;
+    try testing.expectEqual(Result.success, row_cells_get(got.cells, .fg_color, @ptrCast(&fg)));
+    try testing.expectEqual(fg.r, buf[0].fg_r);
+    try testing.expectEqual(fg.g, buf[0].fg_g);
+    try testing.expectEqual(fg.b, buf[0].fg_b);
+}
+
+test "render: row cells collect wide flags" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        4,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    // U+FF21 FULLWIDTH LATIN CAPITAL LETTER A
+    terminal_c.vt_write(terminal, "\xef\xbc\xa1", 3);
+
+    const def: colorpkg.RGB.C = .{ .r = 0, .g = 0, .b = 0 };
+    var buf: [4]PackedCell = undefined;
+    const got = try collectFirstRow(terminal, def, def, &buf);
+    defer got.deinit();
+    try testing.expectEqual(@as(usize, 4), got.len);
+    try testing.expect(buf[0].flags & PackedCell.flag_wide_head != 0);
+    try testing.expect(buf[1].flags & PackedCell.flag_wide_tail != 0);
+}
+
+test "render: row cells collect kitty placeholder keeps codepoint" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        4,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    // U+10EEEE
+    terminal_c.vt_write(terminal, "\xf4\x8e\xbb\xae", 4);
+
+    const def: colorpkg.RGB.C = .{ .r = 0, .g = 0, .b = 0 };
+    var buf: [4]PackedCell = undefined;
+    const got = try collectFirstRow(terminal, def, def, &buf);
+    defer got.deinit();
+    try testing.expectEqual(@as(usize, 4), got.len);
+    try testing.expectEqual(@as(u32, 0x10EEEE), buf[0].cp);
+}
+
+test "render: row cells collect grapheme flag" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        4,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    // e + combining acute
+    terminal_c.vt_write(terminal, "e\xcc\x81", 3);
+
+    const def: colorpkg.RGB.C = .{ .r = 0, .g = 0, .b = 0 };
+    var buf: [4]PackedCell = undefined;
+    const got = try collectFirstRow(terminal, def, def, &buf);
+    defer got.deinit();
+    try testing.expectEqual(@as(usize, 4), got.len);
+    try testing.expect(buf[0].flags & PackedCell.flag_has_grapheme != 0);
 }

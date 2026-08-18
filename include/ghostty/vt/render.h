@@ -301,6 +301,85 @@ typedef struct {
 } GhosttyRenderStateRowSelection;
 
 /**
+ * One packed viewport cell from ghostty_render_state_row_cells_collect.
+ *
+ * Layout is 16 bytes and is frozen. New fields require a new function.
+ * flags is a bitmask of GhosttyRenderStatePackedCellFlag.
+ *
+ * fg/bg are the same resolved colors as
+ * GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR /
+ * GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR (or def_fg/def_bg when
+ * the cell has none). Inverse is not applied; check the inverse flag.
+ *
+ * @ingroup render
+ */
+typedef struct {
+  /** First Unicode scalar of the cell. 0 if the cell has no text. */
+  uint32_t cp;
+
+  /** Bitmask of GhosttyRenderStatePackedCellFlag. */
+  uint32_t flags;
+
+  /** Resolved foreground red. */
+  uint8_t fg_r;
+
+  /** Resolved foreground green. */
+  uint8_t fg_g;
+
+  /** Resolved foreground blue. */
+  uint8_t fg_b;
+
+  /** Padding. Must be zero. */
+  uint8_t _pad0;
+
+  /** Resolved background red. */
+  uint8_t bg_r;
+
+  /** Resolved background green. */
+  uint8_t bg_g;
+
+  /** Resolved background blue. */
+  uint8_t bg_b;
+
+  /** Padding. Must be zero. */
+  uint8_t _pad1;
+} GhosttyRenderStatePackedCell;
+
+/**
+ * Bit flags for GhosttyRenderStatePackedCell.flags.
+ *
+ * Combine with bitwise OR. Inverse is a flag only; it does not swap fg/bg.
+ *
+ * @ingroup render
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** First cell of a wide (two-column) character. */
+  GHOSTTY_PACKED_CELL_WIDE_HEAD = 1 << 0,
+
+  /** Spacer tail of a wide character. */
+  GHOSTTY_PACKED_CELL_WIDE_TAIL = 1 << 1,
+
+  /** Bold. */
+  GHOSTTY_PACKED_CELL_BOLD = 1 << 2,
+
+  /** Italic. */
+  GHOSTTY_PACKED_CELL_ITALIC = 1 << 3,
+
+  /** Faint. */
+  GHOSTTY_PACKED_CELL_FAINT = 1 << 4,
+
+  /** Inverse (SGR 7). Colors are not swapped. */
+  GHOSTTY_PACKED_CELL_INVERSE = 1 << 5,
+
+  /** Any underline style. */
+  GHOSTTY_PACKED_CELL_UNDERLINE = 1 << 6,
+
+  /** Cell has additional grapheme codepoints beyond cp. */
+  GHOSTTY_PACKED_CELL_HAS_GRAPHEME = 1 << 7,
+  GHOSTTY_PACKED_CELL_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyRenderStatePackedCellFlag;
+
+/**
  * Render-state cursor information.
  *
  * This struct uses the sized-struct ABI pattern. Initialize with
@@ -871,6 +950,38 @@ GHOSTTY_API GhosttyResult ghostty_render_state_row_cells_get_multi(
     const GhosttyRenderStateRowCellsData* keys,
     void** values,
     size_t* out_written);
+
+/**
+ * Collect every cell in the current row into a packed buffer.
+ *
+ * One C crossing for the row. The row cells handle must already be bound
+ * with GHOSTTY_RENDER_STATE_ROW_DATA_CELLS. The iterator position is unused.
+ *
+ * Writes min(row_cols, cap) cells, then zero-fills the rest of cap.
+ * *out_len is the number of real cells (not including padding).
+ *
+ * Colors match row_cells_get fg_color/bg_color (or def_fg/def_bg when
+ * the cell has none). Inverse is a flag only; it is not applied to
+ * fg/bg. Multi-codepoint graphemes set HAS_GRAPHEME; fetch UTF-8
+ * separately via ghostty_render_state_row_cells_get.
+ *
+ * @param cells Bound row cells handle (NULL → GHOSTTY_INVALID_VALUE)
+ * @param def_fg Default foreground when the cell has none (NULL → 0,0,0)
+ * @param def_bg Default background when the cell has none (NULL → 0,0,0)
+ * @param out Packed dest (NULL → GHOSTTY_INVALID_VALUE)
+ * @param cap Number of dest slots
+ * @param[out] out_len Real cell count (may be NULL)
+ * @return GHOSTTY_SUCCESS on success
+ *
+ * @ingroup render
+ */
+GHOSTTY_API GhosttyResult ghostty_render_state_row_cells_collect(
+    GhosttyRenderStateRowCells cells,
+    const GhosttyColorRgb* def_fg,
+    const GhosttyColorRgb* def_bg,
+    GhosttyRenderStatePackedCell* out,
+    size_t cap,
+    size_t* out_len);
 
 /**
  * Free a row cells instance.

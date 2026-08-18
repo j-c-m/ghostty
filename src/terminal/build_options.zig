@@ -97,6 +97,13 @@ pub const Options = struct {
         /// C API: `ghostty_render_state_*`.
         render_state: bool = true,
 
+        /// Full-screen text search over the active screen and
+        /// scrollback (ScreenSearch), including a flattened
+        /// row-local match list for C embedders.
+        ///
+        /// C API: `ghostty_screen_search_*`.
+        search: bool = true,
+
         /// Encoding of host input events into the byte sequences a
         /// terminal application expects: keyboard input (including the
         /// Kitty keyboard protocol), mouse reporting, focus reporting,

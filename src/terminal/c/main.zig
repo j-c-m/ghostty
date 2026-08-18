@@ -32,6 +32,7 @@ pub const types = @import("types.zig");
 pub const modes = @import("modes.zig");
 pub const osc = @import("osc.zig");
 pub const render = @import("render.zig");
+pub const search = @import("search.zig");
 pub const selection = @import("selection.zig");
 pub const selection_gesture = @import("selection_gesture.zig");
 pub const key_event = @import("key_event.zig");
@@ -82,6 +83,11 @@ pub const formatter_format = formatter.format;
 pub const formatter_format_buf = formatter.format_buf;
 pub const formatter_format_alloc = formatter.format_alloc;
 pub const formatter_free = formatter.free;
+
+pub const screen_search_new = search.screen_search_new;
+pub const screen_search_free = search.screen_search_free;
+pub const screen_search_match_count = search.screen_search_match_count;
+pub const screen_search_match_at = search.screen_search_match_at;
 
 pub const render_state_new = render.new;
 pub const render_state_free = render.free;

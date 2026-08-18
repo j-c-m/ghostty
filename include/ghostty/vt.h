@@ -30,6 +30,7 @@
  * The API is organized into the following groups:
  * - @ref terminal "Terminal" - Complete terminal emulator state and rendering
  * - @ref render "Render State" - Incremental render state updates for custom renderers
+ * - @ref search "Screen Search" - Full-screen text search including scrollback
  * - @ref formatter "Formatter" - Format terminal content as plain text, VT sequences, or HTML
  * - @ref snapshot "Terminal Snapshot" - Encode and incrementally restore terminal state
  * - @ref osc "OSC Parser" - Parse OSC (Operating System Command) sequences
@@ -56,6 +57,7 @@
  * - @ref c-vt-paste/src/main.c - Paste safety check example
  * - @ref c-vt-sgr/src/main.c - SGR parser example
  * - @ref c-vt-formatter/src/main.c - Terminal formatter example
+ * - @ref c-vt-search/src/main.c - Screen search example
  * - @ref c-vt-grid-traverse/src/main.c - Grid traversal example using grid refs
  * - @ref c-vt-grid-ref-tracked/src/main.c - Tracked grid ref example
  * - @ref c-vt-compression/src/main.c - Idle scrollback compression example
@@ -96,6 +98,11 @@
  * This example demonstrates how to use the terminal and formatter APIs to
  * create a terminal, write VT-encoded content into it, and format the screen
  * contents as plain text.
+ */
+
+/** @example c-vt-search/src/main.c
+ * This example demonstrates how to search the active screen including
+ * scrollback and read row-local match coordinates.
  */
 
 /** @example c-vt-grid-traverse/src/main.c
@@ -154,6 +161,7 @@ extern "C" {
 #include <ghostty/vt/paste.h>
 #include <ghostty/vt/point.h>
 #include <ghostty/vt/screen.h>
+#include <ghostty/vt/search.h>
 #include <ghostty/vt/selection.h>
 #include <ghostty/vt/size_report.h>
 #include <ghostty/vt/snapshot.h>

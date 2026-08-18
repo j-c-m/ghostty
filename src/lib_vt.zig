@@ -305,6 +305,12 @@ comptime {
             @export(&c.render_state_row_cells_free, .{ .name = "ghostty_render_state_row_cells_free" });
             @export(&c.render_state_free, .{ .name = "ghostty_render_state_free" });
         }
+        if (features.search) {
+            @export(&c.screen_search_new, .{ .name = "ghostty_screen_search_new" });
+            @export(&c.screen_search_free, .{ .name = "ghostty_screen_search_free" });
+            @export(&c.screen_search_match_count, .{ .name = "ghostty_screen_search_match_count" });
+            @export(&c.screen_search_match_at, .{ .name = "ghostty_screen_search_match_at" });
+        }
         @export(&c.terminal_new, .{ .name = "ghostty_terminal_new" });
         @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
         @export(&c.terminal_reset, .{ .name = "ghostty_terminal_reset" });

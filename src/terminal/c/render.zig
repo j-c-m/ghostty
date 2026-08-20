@@ -49,6 +49,11 @@ const RowIteratorWrapper = struct {
     /// The color palette from the render state, needed to resolve
     /// palette-indexed background colors on cells.
     palette: *const colorpkg.Palette,
+
+    /// Default foreground/background from the render state, used when a
+    /// packed cell has no explicit color.
+    fg: colorpkg.RGB.C,
+    bg: colorpkg.RGB.C,
 };
 
 const RowCellsWrapper = struct {
@@ -332,6 +337,8 @@ fn getTyped(
                 .dirty = row_data.items(.dirty),
                 .state_dirty = &state.state.dirty,
                 .palette = &state.state.colors.palette,
+                .fg = state.state.colors.foreground.cval(),
+                .bg = state.state.colors.background.cval(),
             };
         },
         .color_background => out.* = state.state.colors.background.cval(),
@@ -552,6 +559,8 @@ pub fn row_iterator_new(
         .dirty = undefined,
         .state_dirty = undefined,
         .palette = undefined,
+        .fg = undefined,
+        .bg = undefined,
     };
     result.* = ptr;
     return .success;
@@ -873,6 +882,53 @@ fn rowCellsGetGraphemesUtf8(
     return .success;
 }
 
+/// C: GhosttyRenderStatePackedCell
+pub const PackedCell = extern struct {
+    cp: u32 = 0,
+    flags: u32 = 0,
+    fg_r: u8 = 0,
+    fg_g: u8 = 0,
+    fg_b: u8 = 0,
+    _pad0: u8 = 0,
+    bg_r: u8 = 0,
+    bg_g: u8 = 0,
+    bg_b: u8 = 0,
+    _pad1: u8 = 0,
+
+    pub const flag_wide_head: u32 = 1 << 0;
+    pub const flag_wide_tail: u32 = 1 << 1;
+    pub const flag_bold: u32 = 1 << 2;
+    pub const flag_italic: u32 = 1 << 3;
+    pub const flag_faint: u32 = 1 << 4;
+    pub const flag_inverse: u32 = 1 << 5;
+    pub const flag_underline: u32 = 1 << 6;
+    pub const flag_has_grapheme: u32 = 1 << 7;
+
+    comptime {
+        std.debug.assert(@sizeOf(@This()) == 16);
+    }
+};
+
+/// C: GhosttyRenderStatePackedCellFlag
+pub const PackedCellFlag = enum(c_int) {
+    wide_head = 1 << 0,
+    wide_tail = 1 << 1,
+    bold = 1 << 2,
+    italic = 1 << 3,
+    faint = 1 << 4,
+    inverse = 1 << 5,
+    underline = 1 << 6,
+    has_grapheme = 1 << 7,
+};
+
+/// C: GhosttyRenderStatePackedCells
+pub const PackedCells = extern struct {
+    size: usize = @sizeOf(PackedCells),
+    ptr: ?[*]PackedCell = null,
+    cap: usize = 0,
+    len: usize = 0,
+};
+
 /// C: GhosttyRenderStateRowData
 pub const RowData = enum(c_int) {
     invalid = 0,
@@ -881,6 +937,7 @@ pub const RowData = enum(c_int) {
     cells = 3,
     selection = 4,
     cells_raw = 5,
+    cells_packed = 6,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: RowData) type {
@@ -891,6 +948,7 @@ pub const RowData = enum(c_int) {
             .cells => RowCells,
             .selection => RowSelection,
             .cells_raw => cell_c.CellsView,
+            .cells_packed => PackedCells,
         };
     }
 };
@@ -1014,9 +1072,107 @@ fn rowGetTyped(
                 .len = raws.len,
             };
         },
+        .cells_packed => return writePackedCells(it, y, out),
     }
 
     return .success;
+}
+
+fn writePackedCells(
+    it: *const RowIteratorWrapper,
+    y: usize,
+    out: *PackedCells,
+) Result {
+    const out_size = out.size;
+    if (out_size < @sizeOf(usize)) return .invalid_value;
+
+    const cell_data = it.cells[y].slice();
+    const raws = cell_data.items(.raw);
+    const styles = cell_data.items(.style);
+    const cols = raws.len;
+
+    if (lib.structSizedFieldFits(PackedCells, out_size, "len")) {
+        out.len = cols;
+    }
+
+    const cap = if (lib.structSizedFieldFits(PackedCells, out_size, "cap"))
+        out.cap
+    else
+        0;
+    if (!lib.structSizedFieldFits(PackedCells, out_size, "ptr")) return .success;
+    if (cap > 0 and out.ptr == null) return .invalid_value;
+    if (cap < cols) return .out_of_space;
+
+    const dest = out.ptr.?;
+    var skip_tail = false;
+    var i: usize = 0;
+    while (i < cols) : (i += 1) {
+        const style: Style = if (raws[i].hasStyling()) styles[i] else .{};
+        dest[i] = packCell(raws[i], style, it.palette, it.fg, it.bg, &skip_tail);
+    }
+    const empty = PackedCell{};
+    while (i < cap) : (i += 1) {
+        dest[i] = empty;
+    }
+    return .success;
+}
+
+fn packCell(
+    cell: page.Cell,
+    style: Style,
+    palette: *const colorpkg.Palette,
+    def_fg: colorpkg.RGB.C,
+    def_bg: colorpkg.RGB.C,
+    skip_tail: *bool,
+) PackedCell {
+    var out = PackedCell{};
+
+    if (skip_tail.*) {
+        out.flags |= PackedCell.flag_wide_tail;
+        skip_tail.* = false;
+    } else switch (cell.wide) {
+        .wide => {
+            out.flags |= PackedCell.flag_wide_head;
+            skip_tail.* = true;
+        },
+        .spacer_tail => out.flags |= PackedCell.flag_wide_tail,
+        else => {},
+    }
+
+    const bg_only = cell.content_tag == .bg_color_palette or
+        cell.content_tag == .bg_color_rgb;
+    if (cell.hasText()) {
+        out.cp = cell.codepoint();
+        if (cell.hasGrapheme()) out.flags |= PackedCell.flag_has_grapheme;
+    }
+
+    var fg = def_fg;
+    var bg_cell = def_bg;
+    var has_bg = false;
+    if (cell.hasStyling() or bg_only) {
+        if (style.fg_color != .none) {
+            fg = style.fg(.{ .default = .{}, .palette = palette }).cval();
+        }
+        if (style.bg(&cell, palette)) |rgb| {
+            bg_cell = rgb.cval();
+            has_bg = true;
+        }
+        if (style.flags.bold) out.flags |= PackedCell.flag_bold;
+        if (style.flags.italic) out.flags |= PackedCell.flag_italic;
+        if (style.flags.faint) out.flags |= PackedCell.flag_faint;
+        if (style.flags.inverse) out.flags |= PackedCell.flag_inverse;
+        if (@intFromEnum(style.flags.underline) != 0) {
+            out.flags |= PackedCell.flag_underline;
+        }
+    }
+    const bg = if (has_bg) bg_cell else def_bg;
+    out.fg_r = fg.r;
+    out.fg_g = fg.g;
+    out.fg_b = fg.b;
+    out.bg_r = bg.r;
+    out.bg_g = bg.g;
+    out.bg_b = bg.b;
+    return out;
 }
 
 pub fn row_set(
@@ -2567,4 +2723,267 @@ test "render: row_cells_get_multi null returns invalid_value" {
     var raw: row.CRow = undefined;
     var values = [_]?*anyopaque{@ptrCast(&raw)};
     try testing.expectEqual(Result.invalid_value, row_cells_get_multi(null, 1, null, &values, null));
+}
+
+const PackedRow = struct {
+    state: RenderState,
+    it: RowIterator,
+    len: usize,
+    fg: colorpkg.RGB.C,
+    bg: colorpkg.RGB.C,
+
+    fn deinit(self: PackedRow) void {
+        row_iterator_free(self.it);
+        free(self.state);
+    }
+};
+
+fn packedFirstRow(terminal: terminal_c.Terminal, out: []PackedCell) !PackedRow {
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    errdefer free(state);
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var fg: colorpkg.RGB.C = undefined;
+    var bg: colorpkg.RGB.C = undefined;
+    try testing.expectEqual(Result.success, get(state, .color_foreground, @ptrCast(&fg)));
+    try testing.expectEqual(Result.success, get(state, .color_background, @ptrCast(&bg)));
+
+    var it: RowIterator = null;
+    try testing.expectEqual(Result.success, row_iterator_new(
+        &lib.alloc.test_allocator,
+        &it,
+    ));
+    errdefer row_iterator_free(it);
+    try testing.expectEqual(Result.success, get(state, .row_iterator, @ptrCast(&it)));
+    try testing.expect(row_iterator_next(it));
+
+    var packed_out: PackedCells = .{
+        .size = @sizeOf(PackedCells),
+        .ptr = out.ptr,
+        .cap = out.len,
+        .len = 0,
+    };
+    try testing.expectEqual(Result.success, row_get(it, .cells_packed, @ptrCast(&packed_out)));
+    return .{ .state = state, .it = it, .len = packed_out.len, .fg = fg, .bg = bg };
+}
+
+test "render: row get cells_packed invalid_value" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        4,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var it: RowIterator = null;
+    try testing.expectEqual(Result.success, row_iterator_new(
+        &lib.alloc.test_allocator,
+        &it,
+    ));
+    defer row_iterator_free(it);
+    try testing.expectEqual(Result.success, get(state, .row_iterator, @ptrCast(&it)));
+
+    var buf: [4]PackedCell = undefined;
+    var packed_out: PackedCells = .{
+        .size = @sizeOf(PackedCells),
+        .ptr = &buf,
+        .cap = buf.len,
+        .len = 0,
+    };
+    try testing.expectEqual(Result.invalid_value, row_get(it, .cells_packed, @ptrCast(&packed_out)));
+
+    try testing.expect(row_iterator_next(it));
+    packed_out = .{
+        .size = @sizeOf(PackedCells),
+        .ptr = null,
+        .cap = 4,
+        .len = 0,
+    };
+    try testing.expectEqual(Result.invalid_value, row_get(it, .cells_packed, @ptrCast(&packed_out)));
+}
+
+test "render: row get cells_packed empty uses defaults" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        4,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    var buf: [6]PackedCell = undefined;
+    const got = try packedFirstRow(terminal, &buf);
+    defer got.deinit();
+
+    try testing.expectEqual(@as(usize, 4), got.len);
+    try testing.expectEqual(@as(u32, 0), buf[0].cp);
+    try testing.expectEqual(@as(u32, 0), buf[0].flags);
+    try testing.expectEqual(got.fg.r, buf[0].fg_r);
+    try testing.expectEqual(got.fg.g, buf[0].fg_g);
+    try testing.expectEqual(got.fg.b, buf[0].fg_b);
+    try testing.expectEqual(got.bg.r, buf[0].bg_r);
+    try testing.expectEqual(@as(u32, 0), buf[4].cp);
+    try testing.expectEqual(@as(u32, 0), buf[5].flags);
+}
+
+test "render: row get cells_packed out_of_space" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        4,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var it: RowIterator = null;
+    try testing.expectEqual(Result.success, row_iterator_new(
+        &lib.alloc.test_allocator,
+        &it,
+    ));
+    defer row_iterator_free(it);
+    try testing.expectEqual(Result.success, get(state, .row_iterator, @ptrCast(&it)));
+    try testing.expect(row_iterator_next(it));
+
+    var packed_out: PackedCells = .{
+        .size = @sizeOf(PackedCells),
+        .ptr = null,
+        .cap = 0,
+        .len = 0,
+    };
+    try testing.expectEqual(Result.out_of_space, row_get(it, .cells_packed, @ptrCast(&packed_out)));
+    try testing.expectEqual(@as(usize, 4), packed_out.len);
+
+    var buf: [1]PackedCell = undefined;
+    packed_out = .{
+        .size = @sizeOf(PackedCells),
+        .ptr = &buf,
+        .cap = buf.len,
+        .len = 0,
+    };
+    try testing.expectEqual(Result.out_of_space, row_get(it, .cells_packed, @ptrCast(&packed_out)));
+    try testing.expectEqual(@as(usize, 4), packed_out.len);
+}
+
+test "render: row get cells_packed inverse is flag only" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        10,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    const input = "\x1b[38;2;10;20;30m\x1b[7mA";
+    terminal_c.vt_write(terminal, input, input.len);
+
+    var buf: [10]PackedCell = undefined;
+    const got = try packedFirstRow(terminal, &buf);
+    defer got.deinit();
+    try testing.expectEqual(@as(usize, 10), got.len);
+
+    try testing.expectEqual(@as(u32, 'A'), buf[0].cp);
+    try testing.expect(buf[0].flags & PackedCell.flag_inverse != 0);
+    try testing.expectEqual(@as(u8, 10), buf[0].fg_r);
+    try testing.expectEqual(@as(u8, 20), buf[0].fg_g);
+    try testing.expectEqual(@as(u8, 30), buf[0].fg_b);
+
+    var cells: RowCells = null;
+    try testing.expectEqual(Result.success, row_cells_new(
+        &lib.alloc.test_allocator,
+        &cells,
+    ));
+    defer row_cells_free(cells);
+    try testing.expectEqual(Result.success, row_get(got.it, .cells, @ptrCast(&cells)));
+    try testing.expectEqual(Result.success, row_cells_select(cells, 0));
+    var fg: colorpkg.RGB.C = undefined;
+    try testing.expectEqual(Result.success, row_cells_get(cells, .fg_color, @ptrCast(&fg)));
+    try testing.expectEqual(fg.r, buf[0].fg_r);
+    try testing.expectEqual(fg.g, buf[0].fg_g);
+    try testing.expectEqual(fg.b, buf[0].fg_b);
+}
+
+test "render: row get cells_packed wide flags" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        4,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    // U+FF21 FULLWIDTH LATIN CAPITAL LETTER A
+    terminal_c.vt_write(terminal, "\xef\xbc\xa1", 3);
+
+    var buf: [4]PackedCell = undefined;
+    const got = try packedFirstRow(terminal, &buf);
+    defer got.deinit();
+    try testing.expectEqual(@as(usize, 4), got.len);
+    try testing.expect(buf[0].flags & PackedCell.flag_wide_head != 0);
+    try testing.expect(buf[1].flags & PackedCell.flag_wide_tail != 0);
+}
+
+test "render: row get cells_packed kitty placeholder keeps codepoint" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        4,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    // U+10EEEE
+    terminal_c.vt_write(terminal, "\xf4\x8e\xbb\xae", 4);
+
+    var buf: [4]PackedCell = undefined;
+    const got = try packedFirstRow(terminal, &buf);
+    defer got.deinit();
+    try testing.expectEqual(@as(usize, 4), got.len);
+    try testing.expectEqual(@as(u32, 0x10EEEE), buf[0].cp);
+}
+
+test "render: row get cells_packed grapheme flag" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        4,
+        1,
+    ));
+    defer terminal_c.free(terminal);
+
+    // e + combining acute
+    terminal_c.vt_write(terminal, "e\xcc\x81", 3);
+
+    var buf: [4]PackedCell = undefined;
+    const got = try packedFirstRow(terminal, &buf);
+    defer got.deinit();
+    try testing.expectEqual(@as(usize, 4), got.len);
+    try testing.expect(buf[0].flags & PackedCell.flag_has_grapheme != 0);
 }

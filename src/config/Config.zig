@@ -1001,6 +1001,33 @@ palette: Palette = .{},
 /// The default value is "3" for discrete devices and "1" for precision devices.
 @"mouse-scroll-multiplier": MouseScrollMultiplier = .default,
 
+/// Enable inertial scrolling of host scrollback. Motion can sit
+/// between rows. The format is a comma-separated list of options.
+/// Prefix an option with `no-` to disable it. Omitted options keep
+/// their default.
+///
+/// Available options:
+///
+/// - `mouse` Wheel coasts with friction and rests on a row. Trackpad
+///   and other precision devices follow pixel deltas, including OS
+///   inertia after lift, and can rest partway through a row.
+///
+/// - `key` Viewport scroll keybinds (page up/down, scroll to
+///   top/bottom) use coasting physics. Page up/down snap to a whole
+///   row on settle. Scroll to top/bottom land on the extremes.
+///
+/// - `jump` Find next/previous and other programmatic jumps (jump to
+///   prompt, jump to selection) ease to the target with the same
+///   accelerating cap as scroll to top/bottom.
+///
+/// `true` enables all options. `false` disables all options.
+///
+/// This only affects host scrollback on the primary screen. Alternate
+/// screen buffers, mouse reporting, and live PTY output stay discrete.
+///
+/// The default is `mouse, no-key, no-jump`.
+@"smooth-scrollback": SmoothScrollback = .default,
+
 /// The opacity level (opposite of transparency) of the background. A value of
 /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
 /// or greater than 1 will be clamped to the nearest valid value.
@@ -10420,6 +10447,19 @@ pub const ScrollToBottom = packed struct {
     output: bool = false,
 
     pub const default: ScrollToBottom = .{};
+};
+
+/// See smooth-scrollback
+pub const SmoothScrollback = packed struct {
+    mouse: bool = true,
+    key: bool = false,
+    jump: bool = false,
+
+    pub const default: SmoothScrollback = .{};
+
+    pub fn any(self: SmoothScrollback) bool {
+        return self.mouse or self.key or self.jump;
+    }
 };
 
 /// See notify-on-command-finish

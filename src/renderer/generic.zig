@@ -255,6 +255,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// wakeup.
         kitty_animation_next_ms: ?u64 = null,
 
+        /// True while scroll physics still has velocity or a seek in flight.
+        /// Drives animationWake so coasting continues after the grid is clean.
+        smooth_scrollback_moving: bool = false,
+        /// Fractional row offset from ScrollPhysics, applied as a pixel
+        /// shift in `uniforms.content_offset`.
+        smooth_visual_offset_rows: f64 = 0,
+        /// Last integer viewport row we applied from physics. Used to detect
+        /// external viewport changes (scrollbar, jump-to-prompt, etc.).
+        smooth_scrollback_applied_row: ?usize = null,
+        /// Last PageList `scrollbar.total`. Used to detect history-cap trims
+        /// from the top so physics can `trimTop` instead of seeking.
+        smooth_scrollback_last_total: ?usize = null,
+        /// Previous physics tick, for dt.
+        smooth_scrollback_last_tick: ?std.Io.Timestamp = null,
+
         const HighlightTag = enum(u8) {
             search_match,
             search_match_selected,
@@ -583,6 +598,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             background_blur: configpkg.Config.BackgroundBlur,
             scroll_to_bottom_on_output: bool,
             custom_shader_animation: configpkg.CustomShaderAnimation,
+            smooth_scrollback: configpkg.Config.SmoothScrollback,
+            mouse_reporting: bool,
 
             pub fn init(
                 alloc_gpa: Allocator,
@@ -658,6 +675,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .background_blur = config.@"background-blur",
                     .scroll_to_bottom_on_output = config.@"scroll-to-bottom".output,
                     .custom_shader_animation = config.@"custom-shader-animation",
+                    .smooth_scrollback = config.@"smooth-scrollback",
+                    .mouse_reporting = config.@"mouse-reporting",
                     .arena = arena,
                 };
             }
@@ -1066,8 +1085,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 break :kitty @max(next -| now_ms, draw_interval_ms);
             };
 
+            const scroll_delay: ?u64 = if (self.smooth_scrollback_moving)
+                draw_interval_ms
+            else
+                null;
+
             // An update wake includes a draw, so it wins ties.
-            if (kitty_delay) |k| {
+            var update_delay: ?u64 = kitty_delay;
+            if (scroll_delay) |s| {
+                update_delay = if (update_delay) |k| @min(k, s) else s;
+            }
+            if (update_delay) |k| {
                 if (shader_delay == null or k <= shader_delay.?) {
                     return .{ .delay_ms = k, .kind = .update };
                 }
@@ -1342,6 +1370,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     state.terminal.scrollViewport(.bottom);
                 }
 
+                // Integrate host-scrollback physics and apply the integer
+                // viewport before we snapshot render state, so the extra
+                // row and pin match this frame.
+                self.tickSmoothScrollback(state);
+
                 // Begin the update of our terminal state. Work that
                 // doesn't require terminal access (e.g. style
                 // denormalization) is deferred to the endUpdate call
@@ -1598,10 +1631,106 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Update custom shader uniforms that depend on terminal state.
                 self.updateCustomShaderUniformsFromState();
+
+                // Fractional scroll pixel shift. Set every frame so coasting
+                // does not depend on a grid resize.
+                self.uniforms.content_offset = .{
+                    0,
+                    @floatCast(self.smooth_visual_offset_rows *
+                        @as(f64, @floatFromInt(self.grid_metrics.cell_height))),
+                };
             }
 
             // Start the display link now that the rebuilt frame is ready.
             self.syncDisplayLink(null, null);
+        }
+
+        /// Step host-scrollback physics and sync the integer viewport.
+        /// Caller must hold the terminal mutex (the updateFrame critical section).
+        fn tickSmoothScrollback(self: *Self, state: *renderer.State) void {
+            const now: std.Io.Timestamp = .now(global.io(), .awake);
+            const dt: f64 = dt: {
+                defer self.smooth_scrollback_last_tick = now;
+                const last = self.smooth_scrollback_last_tick orelse break :dt 1.0 / 60.0;
+                const ns: f64 = @floatFromInt(last.durationTo(now).nanoseconds);
+                break :dt std.math.clamp(ns / std.time.ns_per_s, 0, 0.05);
+            };
+
+            const t = state.terminal;
+            const alt = t.screens.active_key == .alternate;
+            // Same predicate as Surface.smoothScrollbackLocked: mouse tracking
+            // only takes over when reporting is actually enabled.
+            const mouse = self.config.mouse_reporting and t.flags.mouse_event != .none;
+            if (!self.config.smooth_scrollback.any() or alt or mouse) {
+                self.terminal_state.paint_extra_rows = 0;
+                self.smooth_visual_offset_rows = 0;
+                self.smooth_scrollback_moving = false;
+                self.smooth_scrollback_applied_row = null;
+                self.smooth_scrollback_last_total = null;
+                // Leave pin/position; the next enabled tick syncs from the grid.
+                state.visual_offset_y.store(0, .monotonic);
+                return;
+            }
+
+            const sb = t.screens.active.pages.scrollbar();
+            const max_o: f64 = @floatFromInt(sb.total -| sb.len);
+            self.applyHistoryTrim(state, sb);
+
+            if (self.smooth_scrollback_applied_row) |applied| {
+                if (applied != sb.offset) {
+                    // Find, jump-to-prompt, and similar paths move the
+                    // integer viewport out from under us. If we are pinned
+                    // to the bottom, syncFromScrollbar would snap back and
+                    // undo that. Chase the new offset with the same
+                    // accelerating cap as Home/End.
+                    if (t.screens.active.viewportIsBottom()) {
+                        state.scroll.pinBottom(max_o);
+                    } else if (self.config.smooth_scrollback.jump) {
+                        state.scroll.smoothTo(@floatFromInt(sb.offset), max_o);
+                    } else {
+                        state.scroll.snapTo(@floatFromInt(sb.offset), max_o);
+                    }
+                }
+            } else {
+                state.scroll.syncFromScrollbar(
+                    @floatFromInt(sb.offset),
+                    max_o,
+                    t.screens.active.viewportIsBottom(),
+                );
+            }
+
+            state.scroll.followBottomIfPinned(max_o);
+            const moving = state.scroll.step(dt, max_o);
+            const target: usize = @intCast(state.scroll.integerRow(max_o));
+            if (target != sb.offset) {
+                t.scrollViewport(.{ .row = target });
+            }
+            self.smooth_scrollback_applied_row = target;
+            self.smooth_visual_offset_rows = state.scroll.visualOffsetRows(max_o);
+            self.smooth_scrollback_moving = moving;
+
+            self.terminal_state.paint_extra_rows =
+                if (@abs(self.smooth_visual_offset_rows) < 1e-6) 0 else 1;
+
+            const px: f32 = @floatCast(
+                self.smooth_visual_offset_rows *
+                    @as(f64, @floatFromInt(self.grid_metrics.cell_height)),
+            );
+            state.visual_offset_y.store(@bitCast(px), .monotonic);
+        }
+
+        /// Trim physics only when PageList remapped `offset` by the same `n`.
+        fn applyHistoryTrim(self: *Self, state: *renderer.State, sb: terminal.Scrollbar) void {
+            const total = sb.total;
+            defer self.smooth_scrollback_last_total = total;
+            if (state.scroll.pinned_to_bottom) return;
+            const prev_total = self.smooth_scrollback_last_total orelse return;
+            if (total >= prev_total) return;
+            const n = prev_total - total;
+            const off = self.smooth_scrollback_applied_row orelse return;
+            if (off < n or off - n != sb.offset) return;
+            state.scroll.trimTop(@floatFromInt(n));
+            self.smooth_scrollback_applied_row = sb.offset;
         }
 
         /// Draw the frame to the screen.

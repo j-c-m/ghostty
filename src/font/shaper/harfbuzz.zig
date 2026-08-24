@@ -39,6 +39,9 @@ pub const Shaper = struct {
     /// with glyph indices in the buffer.
     codepoints: std.ArrayList(Codepoint) = .empty,
 
+    /// Debug/experiment: number of times `shape` has been called.
+    shape_calls: usize = 0,
+
     const Codepoint = struct {
         cluster: u32,
         codepoint: u32,
@@ -129,6 +132,8 @@ pub const Shaper = struct {
     ///
     /// If there is not enough space in the cell buffer, an error is returned.
     pub fn shape(self: *Shaper, run: font.shape.TextRun) ![]const font.shape.Cell {
+        self.shape_calls += 1;
+
         // We only do shaping if the font is not a special-case. For special-case
         // fonts, the codepoint == glyph_index so we don't need to run any shaping.
         if (run.font_index.special() == null) {

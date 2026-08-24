@@ -36,6 +36,9 @@ pub const Shaper = struct {
     /// The shared memory used for storing information about a run.
     run_buf: RunBuf,
 
+    /// Debug/experiment: number of times `shape` has been called.
+    shape_calls: usize = 0,
+
     /// The cell_buf argument is the buffer to use for storing shaped results.
     /// This should be at least the number of columns in the terminal.
     pub fn init(alloc: Allocator, opts: font.shape.Options) !Shaper {
@@ -79,6 +82,8 @@ pub const Shaper = struct {
     /// If there is not enough space in the cell buffer, an error is
     /// returned.
     pub fn shape(self: *Shaper, run: font.shape.TextRun) ![]font.shape.Cell {
+        self.shape_calls += 1;
+
         // TODO: memory check that cell_buf can fit results
 
         const codepoints = self.run_buf.items(.codepoint);

@@ -26,6 +26,9 @@ pub const Shaper = struct {
     /// The shared memory used for shaping results.
     cell_buf: CellBuf,
 
+    /// Debug/experiment: number of times `shape` has been called.
+    shape_calls: usize = 0,
+
     const CellBuf = std.ArrayListUnmanaged(font.shape.Cell);
     const CodepointList = std.ArrayListUnmanaged(Codepoint);
     const Codepoint = struct {
@@ -77,6 +80,8 @@ pub const Shaper = struct {
     }
 
     pub fn shape(self: *Shaper, run: font.shape.TextRun) ![]const font.shape.Cell {
+        self.shape_calls += 1;
+
         const state = &self.run_state;
 
         // Special fonts aren't shaped and their codepoint == glyph so we

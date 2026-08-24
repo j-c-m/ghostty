@@ -79,6 +79,9 @@ pub const Shaper = struct {
     cf_release_thread: *CFReleaseThread,
     cf_release_thr: std.Thread,
 
+    /// Debug/experiment: number of times `shape` has been called.
+    shape_calls: usize = 0,
+
     const CellBuf = std.ArrayListUnmanaged(font.shape.Cell);
     const CodepointList = std.ArrayListUnmanaged(Codepoint);
     const Codepoint = struct {
@@ -317,6 +320,8 @@ pub const Shaper = struct {
         self: *Shaper,
         run: font.shape.TextRun,
     ) ![]const font.shape.Cell {
+        self.shape_calls += 1;
+
         const state = &self.run_state;
 
         // {

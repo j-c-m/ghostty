@@ -612,26 +612,44 @@ test "coverage raster for == and => has ink" {
         try testing.expectEqual(@as(usize, 1), spans.items.len);
         const span = spans.items[0];
 
+        var parts_buf: [8]font.Glyph.CoveragePart = undefined;
+        const n_parts = @min(span.glyphs.len, parts_buf.len);
+        for (span.glyphs[0..n_parts], 0..) |sc, i| {
+            parts_buf[i] = .{
+                .glyph_index = sc.glyph_index,
+                .x = sc.x,
+                .x_offset = sc.x_offset,
+                .y_offset = sc.y_offset,
+            };
+        }
+
         testdata.grid.lock.lockUncancelable(testing.io);
         defer testdata.grid.lock.unlock(testing.io);
         const face = try testdata.grid.resolver.collection.getFace(span.font_index);
+        const g = try face.renderCoverage(
+            alloc,
+            &atlas,
+            parts_buf[0..n_parts],
+            .{
+                .grid_metrics = testdata.grid.metrics,
+                .cell_box = true,
+                .clip_cols = @intCast(span.n),
+            },
+        );
+        try testing.expectEqual(testdata.grid.metrics.cell_width * span.n, g.width);
+        try testing.expectEqual(testdata.grid.metrics.cell_height, g.height);
+        try testing.expect(g.width > testdata.grid.metrics.cell_width);
 
-        var ink = false;
-        for (span.glyphs) |sc| {
-            if (sc.glyph_index == 0) continue;
-            const g = try face.renderGlyph(
-                alloc,
-                &atlas,
-                sc.glyph_index,
-                .{
-                    .grid_metrics = testdata.grid.metrics,
-                    .cell_box = true,
-                    .clip_cols = @intCast(span.n),
-                },
-            );
-            if (g.width > 0 and g.height > 0) ink = true;
+        var right_ink = false;
+        const mid_y = g.atlas_y + g.height / 2;
+        var col: u32 = g.atlas_x + g.width / 2;
+        while (col < g.atlas_x + g.width) : (col += 1) {
+            if (atlas.data[mid_y * atlas.size + col] > 0) {
+                right_ink = true;
+                break;
+            }
         }
-        try testing.expect(ink);
+        try testing.expect(right_ink);
     }
 }
 

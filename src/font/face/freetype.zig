@@ -434,7 +434,10 @@ pub const Face = struct {
         defer self.ft_mutex.unlock(global.io());
 
         if (opts.cell_box) {
-            return try self.renderGlyphCellBox(alloc, atlas, glyph_index, opts);
+            return try self.renderCoverage(alloc, atlas, &.{.{
+                .glyph_index = glyph_index,
+                .x = 0,
+            }}, opts);
         }
 
         // Load the glyph.
@@ -781,50 +784,16 @@ pub const Face = struct {
         };
     }
 
-    /// Rasterize `glyph_index` into a cell-sized (or N-cell) gray tile and
-    /// clip overflow. The quad is the cell: bearings (0, cell_height).
-    fn renderGlyphCellBox(
+    /// Rasterize one or more glyphs into a cell-sized (or N-cell) gray tile
+    /// and clip overflow. The quad is the cell: bearings (0, cell_height).
+    pub fn renderCoverage(
         self: Face,
         alloc: Allocator,
         atlas: *font.Atlas,
-        glyph_index: u32,
+        parts: []const font.Glyph.CoveragePart,
         opts: font.Glyph.RenderOptions,
     ) !Glyph {
         if (atlas.format != .grayscale) return error.WrongAtlas;
-
-        try self.face.loadGlyph(glyph_index, self.glyphLoadFlags(false));
-        const glyph = self.face.handle.*.glyph;
-
-        if (self.synthetic.bold) {
-            const font_height: f64 = @floatFromInt(self.face.handle.*.size.*.metrics.height);
-            const ratio: f64 = 64.0 / 2048.0;
-            const amount = @ceil(font_height * ratio);
-            _ = freetype.c.FT_Outline_Embolden(&glyph.*.outline, @intFromFloat(amount));
-        }
-
-        if (glyph.*.format == freetype.c.FT_GLYPH_FORMAT_OUTLINE) {
-            try self.face.renderGlyph(
-                if (self.load_flags.monochrome) .mono else .normal,
-            );
-        } else if (glyph.*.format == freetype.c.FT_GLYPH_FORMAT_BITMAP) {
-            // Bitmap glyphs keep their existing buffer.
-        } else {
-            return error.UnsupportedGlyphFormat;
-        }
-
-        if (glyph.*.bitmap.pixel_mode == freetype.c.FT_PIXEL_MODE_BGRA) {
-            return error.WrongAtlas;
-        }
-        if (glyph.*.bitmap.width == 0 or glyph.*.bitmap.rows == 0) {
-            return .{
-                .width = 0,
-                .height = 0,
-                .offset_x = 0,
-                .offset_y = 0,
-                .atlas_x = 0,
-                .atlas_y = 0,
-            };
-        }
 
         const metrics = opts.grid_metrics;
         const clip_cols: u32 = @max(1, opts.clip_cols);
@@ -841,60 +810,17 @@ pub const Face = struct {
             };
         }
 
-        var bitmap: freetype.c.FT_Bitmap = undefined;
-        _ = freetype.c.FT_Bitmap_Init(&bitmap);
-        defer _ = freetype.c.FT_Bitmap_Done(self.lib.lib.handle, &bitmap);
-
-        if (freetype.c.FT_Bitmap_Convert(
-            self.lib.lib.handle,
-            &glyph.*.bitmap,
-            &bitmap,
-            1,
-        ) != 0) {
-            return error.BitmapHandlingError;
-        }
-
-        if (bitmap.pixel_mode == freetype.c.FT_PIXEL_MODE_GRAY and
-            bitmap.num_grays < 256)
-        {
-            const len: usize = @intCast(
-                @as(c_uint, @intCast(@abs(bitmap.pitch))) * bitmap.rows,
-            );
-            const factor: u8 = @intCast(255 / (bitmap.num_grays - 1));
-            for (bitmap.buffer[0..len]) |*p| p.* *= factor;
-            bitmap.num_grays = 256;
-        }
-
-        const advance = f26dot6ToF64(glyph.*.metrics.horiAdvance);
-        const box_wf: f64 = @floatFromInt(box_w);
-        const pen_x = if (clip_cols > 1)
-            0
-        else
-            @max(0, (box_wf - advance) * 0.5);
-        const baseline: i32 = @intCast(metrics.cell_baseline);
-
-        const dest_x: i32 = @as(i32, @intFromFloat(@floor(pen_x))) + glyph.*.bitmap_left;
-        const dest_y: i32 = @as(i32, @intCast(box_h)) - baseline - glyph.*.bitmap_top;
-
         const dest = try alloc.alloc(u8, box_w * box_h);
         defer alloc.free(dest);
         @memset(dest, 0);
 
-        const src_w: i32 = @intCast(bitmap.width);
-        const src_h: i32 = @intCast(bitmap.rows);
-        const pitch: i32 = bitmap.pitch;
-        var row: i32 = 0;
-        while (row < src_h) : (row += 1) {
-            const dy = dest_y + row;
-            if (dy < 0 or dy >= box_h) continue;
-            var col: i32 = 0;
-            while (col < src_w) : (col += 1) {
-                const dx = dest_x + col;
-                if (dx < 0 or dx >= box_w) continue;
-                const src_i: usize = @intCast(row * @abs(pitch) + col);
-                const dst_i: usize = @intCast(dy * @as(i32, @intCast(box_w)) + dx);
-                dest[dst_i] = @max(dest[dst_i], bitmap.buffer[src_i]);
-            }
+        const box_wf: f64 = @floatFromInt(box_w);
+        const baseline: i32 = @intCast(metrics.cell_baseline);
+        const cell_w_i: i32 = @intCast(metrics.cell_width);
+
+        for (parts) |part| {
+            if (part.glyph_index == 0) continue;
+            try self.blitCoveragePart(dest, box_w, box_h, box_wf, baseline, cell_w_i, clip_cols, part);
         }
 
         var ink = false;
@@ -926,6 +852,88 @@ pub const Face = struct {
             .atlas_x = region.x,
             .atlas_y = region.y,
         };
+    }
+
+    fn blitCoveragePart(
+        self: Face,
+        dest: []u8,
+        box_w: u32,
+        box_h: u32,
+        box_wf: f64,
+        baseline: i32,
+        cell_w_i: i32,
+        clip_cols: u32,
+        part: font.Glyph.CoveragePart,
+    ) !void {
+        try self.face.loadGlyph(part.glyph_index, self.glyphLoadFlags(false));
+        const glyph = self.face.handle.*.glyph;
+
+        if (self.synthetic.bold) {
+            const font_height: f64 = @floatFromInt(self.face.handle.*.size.*.metrics.height);
+            const ratio: f64 = 64.0 / 2048.0;
+            const amount = @ceil(font_height * ratio);
+            _ = freetype.c.FT_Outline_Embolden(&glyph.*.outline, @intFromFloat(amount));
+        }
+
+        if (glyph.*.format == freetype.c.FT_GLYPH_FORMAT_OUTLINE) {
+            try self.face.renderGlyph(
+                if (self.load_flags.monochrome) .mono else .normal,
+            );
+        } else if (glyph.*.format != freetype.c.FT_GLYPH_FORMAT_BITMAP) {
+            return;
+        }
+
+        if (glyph.*.bitmap.pixel_mode == freetype.c.FT_PIXEL_MODE_BGRA) return;
+        if (glyph.*.bitmap.width == 0 or glyph.*.bitmap.rows == 0) return;
+
+        var bitmap: freetype.c.FT_Bitmap = undefined;
+        _ = freetype.c.FT_Bitmap_Init(&bitmap);
+        defer _ = freetype.c.FT_Bitmap_Done(self.lib.lib.handle, &bitmap);
+
+        if (freetype.c.FT_Bitmap_Convert(
+            self.lib.lib.handle,
+            &glyph.*.bitmap,
+            &bitmap,
+            1,
+        ) != 0) {
+            return error.BitmapHandlingError;
+        }
+
+        if (bitmap.pixel_mode == freetype.c.FT_PIXEL_MODE_GRAY and
+            bitmap.num_grays < 256)
+        {
+            const len: usize = @intCast(
+                @as(c_uint, @intCast(@abs(bitmap.pitch))) * bitmap.rows,
+            );
+            const factor: u8 = @intCast(255 / (bitmap.num_grays - 1));
+            for (bitmap.buffer[0..len]) |*p| p.* *= factor;
+            bitmap.num_grays = 256;
+        }
+
+        const pen_x: f64 = if (clip_cols <= 1) pen_x: {
+            const advance = f26dot6ToF64(glyph.*.metrics.horiAdvance);
+            break :pen_x @max(0, (box_wf - advance) * 0.5);
+        } else @as(f64, @floatFromInt(cell_w_i * @as(i32, @intCast(part.x)) + part.x_offset));
+
+        const dest_x: i32 = @as(i32, @intFromFloat(@floor(pen_x))) + glyph.*.bitmap_left;
+        const dest_y: i32 = @as(i32, @intCast(box_h)) - baseline - glyph.*.bitmap_top - @as(i32, part.y_offset);
+
+        const src_w: i32 = @intCast(bitmap.width);
+        const src_h: i32 = @intCast(bitmap.rows);
+        const pitch: i32 = bitmap.pitch;
+        var row: i32 = 0;
+        while (row < src_h) : (row += 1) {
+            const dy = dest_y + row;
+            if (dy < 0 or dy >= box_h) continue;
+            var col: i32 = 0;
+            while (col < src_w) : (col += 1) {
+                const dx = dest_x + col;
+                if (dx < 0 or dx >= box_w) continue;
+                const src_i: usize = @intCast(row * @abs(pitch) + col);
+                const dst_i: usize = @intCast(dy * @as(i32, @intCast(box_w)) + dx);
+                dest[dst_i] = @max(dest[dst_i], bitmap.buffer[src_i]);
+            }
+        }
     }
 
     /// Convert 16.6 pixel format to pixels based on the scale factor of the

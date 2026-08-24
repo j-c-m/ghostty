@@ -443,6 +443,14 @@ pub const RenderOptions = struct {
     };
 };
 
+/// One shaped glyph to composite into an N-cell coverage tile.
+pub const CoveragePart = struct {
+    glyph_index: u32,
+    x: u16 = 0,
+    x_offset: i16 = 0,
+    y_offset: i16 = 0,
+};
+
 test "Constraints" {
     const comparison = @import("../datastruct/comparison.zig");
     const getConstraint = @import("nerd_font_attributes.zig").getConstraint;

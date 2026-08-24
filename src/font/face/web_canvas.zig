@@ -184,6 +184,27 @@ pub const Face = struct {
 
     /// Render a glyph using the glyph index. The rendered glyph is stored
     /// in the given texture atlas.
+    pub fn renderCoverage(
+        self: Face,
+        alloc: Allocator,
+        atlas: *font.Atlas,
+        parts: []const font.Glyph.CoveragePart,
+        opts: font.Glyph.RenderOptions,
+    ) !font.Glyph {
+        for (parts) |part| {
+            if (part.glyph_index == 0) continue;
+            return try self.renderGlyph(alloc, atlas, part.glyph_index, opts);
+        }
+        return .{
+            .width = 0,
+            .height = 0,
+            .offset_x = 0,
+            .offset_y = 0,
+            .atlas_x = 0,
+            .atlas_y = 0,
+        };
+    }
+
     pub fn renderGlyph(
         self: Face,
         alloc: Allocator,

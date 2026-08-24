@@ -306,7 +306,10 @@ pub const Face = struct {
         const sbix = is_color and self.color != null and self.color.?.sbix;
 
         if (opts.cell_box and !is_color) {
-            return try self.renderGlyphCellBox(alloc, atlas, glyphs[0], opts);
+            return try self.renderCoverage(alloc, atlas, &.{.{
+                .glyph_index = glyph_index,
+                .x = 0,
+            }}, opts);
         }
 
         // If we're rendering a synthetic bold then we will gain 50% of
@@ -570,13 +573,14 @@ pub const Face = struct {
         };
     }
 
-    /// Rasterize `glyph` into a cell-sized (or N-cell) gray tile and clip
-    /// overflow. The quad is the cell: bearings (0, cell_height).
-    fn renderGlyphCellBox(
+    /// Rasterize one or more glyphs into a cell-sized (or N-cell) gray tile
+    /// and clip overflow. The quad is the cell: bearings (0, cell_height).
+    /// Coverage spans pass every shaped glyph so ligatures fill N cells.
+    pub fn renderCoverage(
         self: Face,
         alloc: Allocator,
         atlas: *font.Atlas,
-        glyph: macos.graphics.Glyph,
+        parts: []const font.Glyph.CoveragePart,
         opts: font.Glyph.RenderOptions,
     ) !font.Glyph {
         const metrics = opts.grid_metrics;
@@ -642,22 +646,24 @@ pub const Face = struct {
             context.setLineWidth(ctx, line_width);
         }
 
-        var glyphs = [_]macos.graphics.Glyph{glyph};
-        const advance = self.font.getAdvancesForGlyphs(.horizontal, &glyphs, null);
+        const cell_w: f64 = @floatFromInt(metrics.cell_width);
+        const baseline: f64 = @floatFromInt(metrics.cell_baseline);
         const box_wf: f64 = @floatFromInt(box_w);
-        // N-cell coverage tiles are left-aligned. JetBrains parks the liga
-        // glyph at xOffset≈0 with a spacer taking the advance; centering a
-        // 0-advance liga in the box draws it off-canvas.
-        const pen_x = if (clip_cols > 1)
-            0
-        else
-            @max(0, (box_wf - advance) * 0.5);
-        const pen_y: f64 = @floatFromInt(metrics.cell_baseline);
 
-        self.font.drawGlyphs(&glyphs, &.{.{
-            .x = pen_x,
-            .y = pen_y,
-        }}, ctx);
+        for (parts) |part| {
+            if (part.glyph_index == 0) continue;
+            var gs = [_]macos.graphics.Glyph{@intCast(part.glyph_index)};
+            const pen_x: f64 = if (clip_cols <= 1) pen_x: {
+                const advance = self.font.getAdvancesForGlyphs(.horizontal, &gs, null);
+                break :pen_x @max(0, (box_wf - advance) * 0.5);
+            } else cell_w * @as(f64, @floatFromInt(part.x)) +
+                @as(f64, @floatFromInt(part.x_offset));
+            const pen_y = baseline + @as(f64, @floatFromInt(part.y_offset));
+            self.font.drawGlyphs(&gs, &.{.{
+                .x = pen_x,
+                .y = pen_y,
+            }}, ctx);
+        }
 
         var ink = false;
         for (buf) |p| {

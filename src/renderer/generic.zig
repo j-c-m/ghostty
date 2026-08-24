@@ -3530,22 +3530,46 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             alpha: u8,
         ) !void {
             const clip: u8 = @intCast(@max(@as(u16, 1), span.n));
-            for (span.glyphs) |sc| {
-                if (sc.glyph_index == 0) continue;
-                if (try self.addGlyphIndex(
-                    x,
-                    y,
-                    cols,
-                    cell_raws,
+            var parts_buf: [8]font.Glyph.CoveragePart = undefined;
+            const n_parts = @min(span.glyphs.len, parts_buf.len);
+            for (span.glyphs[0..n_parts], 0..) |sc, i| {
+                parts_buf[i] = .{
+                    .glyph_index = sc.glyph_index,
+                    .x = sc.x,
+                    .x_offset = sc.x_offset,
+                    .y_offset = sc.y_offset,
+                };
+            }
+
+            if (n_parts > 0) {
+                const render = try self.font_grid.renderCoverage(
+                    self.alloc,
                     span.font_index,
-                    sc.glyph_index,
-                    0,
-                    0,
-                    color,
-                    alpha,
-                    .letter,
+                    parts_buf[0..n_parts],
                     clip,
-                )) return;
+                    .{
+                        .grid_metrics = self.grid_metrics,
+                        .thicken = self.config.font_thicken,
+                        .thicken_strength = self.config.font_thicken_strength,
+                        .cell_box = true,
+                        .clip_cols = clip,
+                    },
+                );
+                if (render.glyph.width > 0 and render.glyph.height > 0) {
+                    try self.cells.add(self.alloc, .text, .{
+                        .atlas = .grayscale,
+                        .bools = .{ .no_min_contrast = noMinContrast(cell_raws[x].codepoint()) },
+                        .grid_pos = .{ @intCast(x), @intCast(y) },
+                        .color = .{ color.r, color.g, color.b, alpha },
+                        .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
+                        .glyph_size = .{ render.glyph.width, render.glyph.height },
+                        .bearings = .{
+                            @intCast(render.glyph.offset_x),
+                            @intCast(render.glyph.offset_y),
+                        },
+                    });
+                    return;
+                }
             }
 
             // Confirmed span but no coverage ink (spacer-only). Paint the

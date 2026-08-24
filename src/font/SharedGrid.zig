@@ -44,6 +44,9 @@ codepoints: std.AutoHashMapUnmanaged(CodepointKey, ?Collection.Index) = .{},
 /// Cache for glyph renders into the atlas.
 glyphs: std.HashMapUnmanaged(GlyphKey, Render, GlyphKey.Context, 80) = .{},
 
+/// Cache for N-cell ligature coverage tiles.
+coverage: std.AutoHashMapUnmanaged(u64, Render) = .{},
+
 /// The texture atlas to store renders in. The Glyph data in the glyphs
 /// cache is dependent on the atlas matching.
 atlas_grayscale: Atlas,
@@ -122,6 +125,7 @@ pub fn init(
 pub fn deinit(self: *SharedGrid, alloc: Allocator) void {
     self.codepoints.deinit(alloc);
     self.glyphs.deinit(alloc);
+    self.coverage.deinit(alloc);
     self.atlas_grayscale.deinit(alloc);
     self.atlas_color.deinit(alloc);
     self.resolver.deinit(alloc);
@@ -460,6 +464,62 @@ pub fn renderGlyph(
         .presentation = p,
     };
 
+    return gop.value_ptr.*;
+}
+
+/// Composite shaped glyphs into one N-cell coverage tile.
+pub fn renderCoverage(
+    self: *SharedGrid,
+    alloc: Allocator,
+    index: Collection.Index,
+    parts: []const font.Glyph.CoveragePart,
+    clip_cols: u8,
+    opts: RenderOptions,
+) RenderGlyphError!Render {
+    var hasher = std.hash.Wyhash.init(0);
+    std.hash.autoHash(&hasher, index);
+    std.hash.autoHash(&hasher, clip_cols);
+    std.hash.autoHash(&hasher, opts.thicken);
+    std.hash.autoHash(&hasher, opts.thicken_strength);
+    for (parts) |p| {
+        std.hash.autoHash(&hasher, p.glyph_index);
+        std.hash.autoHash(&hasher, p.x);
+        std.hash.autoHash(&hasher, p.x_offset);
+        std.hash.autoHash(&hasher, p.y_offset);
+    }
+    const key = hasher.final();
+
+    {
+        self.lock.lockSharedUncancelable(global.io());
+        defer self.lock.unlockShared(global.io());
+        if (self.coverage.get(key)) |v| return v;
+    }
+
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
+
+    const gop = try self.coverage.getOrPut(alloc, key);
+    if (gop.found_existing) return gop.value_ptr.*;
+    errdefer _ = self.coverage.remove(key);
+
+    var render_opts = opts;
+    render_opts.cell_box = true;
+    render_opts.clip_cols = @max(clip_cols, 1);
+
+    const atlas = &self.atlas_grayscale;
+    const face = try self.resolver.collection.getFace(index);
+    const glyph = face.renderCoverage(alloc, atlas, parts, render_opts) catch |err| switch (err) {
+        error.AtlasFull => blk: {
+            try atlas.grow(alloc, atlas.size * 2);
+            break :blk try face.renderCoverage(alloc, atlas, parts, render_opts);
+        },
+        else => return err,
+    };
+
+    gop.value_ptr.* = .{
+        .glyph = glyph,
+        .presentation = .text,
+    };
     return gop.value_ptr.*;
 }
 

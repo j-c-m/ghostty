@@ -645,7 +645,13 @@ pub const Face = struct {
         var glyphs = [_]macos.graphics.Glyph{glyph};
         const advance = self.font.getAdvancesForGlyphs(.horizontal, &glyphs, null);
         const box_wf: f64 = @floatFromInt(box_w);
-        const pen_x = @max(0, (box_wf - advance) * 0.5);
+        // N-cell coverage tiles are left-aligned. JetBrains parks the liga
+        // glyph at xOffset≈0 with a spacer taking the advance; centering a
+        // 0-advance liga in the box draws it off-canvas.
+        const pen_x = if (clip_cols > 1)
+            0
+        else
+            @max(0, (box_wf - advance) * 0.5);
         const pen_y: f64 = @floatFromInt(metrics.cell_baseline);
 
         self.font.drawGlyphs(&glyphs, &.{.{

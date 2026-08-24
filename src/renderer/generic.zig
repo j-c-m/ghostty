@@ -3343,7 +3343,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             color: terminal.color.RGB,
             alpha: u8,
         ) !void {
-            try self.addGlyphIndex(
+            _ = try self.addGlyphIndex(
                 x,
                 y,
                 cols,
@@ -3375,7 +3375,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             alpha: u8,
             path: GlyphPath,
             clip_cols: u8,
-        ) !void {
+        ) !bool {
             const cell = cell_raws[x];
             const cp = cell.codepoint();
 
@@ -3410,7 +3410,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             );
 
             if (render.glyph.width == 0 or render.glyph.height == 0) {
-                return;
+                return false;
             }
 
             try self.cells.add(self.alloc, .text, .{
@@ -3428,6 +3428,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     @intCast(render.glyph.offset_y + y_offset),
                 },
             });
+            return true;
         }
 
         fn addCellGridGlyph(
@@ -3451,7 +3452,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.cell_grid_hide.items[x] != 0)
             {
                 if (font.cell_grid.spanStartingAt(self.cell_grid_spans.items, x)) |span| {
-                    try self.addCoverageSpan(x, y, cols, cell_raws, span, color, alpha);
+                    try self.addCoverageSpan(x, y, cols, cell_raws, span, style, color, alpha);
                 }
                 return;
             }
@@ -3475,7 +3476,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             if (idx.special()) |sp| {
                 if (sp == .sprite) {
-                    try self.addGlyphIndex(
+                    _ = try self.addGlyphIndex(
                         x,
                         y,
                         cols,
@@ -3501,7 +3502,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 break :glyph .{ gi, face.isColorGlyph(gi) };
             };
 
-            try self.addGlyphIndex(
+            _ = try self.addGlyphIndex(
                 x,
                 y,
                 cols,
@@ -3524,12 +3525,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             cols: usize,
             cell_raws: []const terminal.page.Cell,
             span: font.cell_grid.Span,
+            style: terminal.Style,
             color: terminal.color.RGB,
             alpha: u8,
         ) !void {
             const clip: u8 = @intCast(@max(@as(u16, 1), span.n));
             for (span.glyphs) |sc| {
-                try self.addGlyphIndex(
+                if (sc.glyph_index == 0) continue;
+                if (try self.addGlyphIndex(
                     x,
                     y,
                     cols,
@@ -3542,8 +3545,43 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     alpha,
                     .letter,
                     clip,
+                )) return;
+            }
+
+            // Confirmed span but no coverage ink (spacer-only). Paint the
+            // underlying cmap letters so "==" cannot vanish.
+            var i: u16 = 0;
+            while (i < span.n) : (i += 1) {
+                const gx: terminal.size.CellCountInt = @intCast(@as(usize, x) + i);
+                if (gx >= cell_raws.len) break;
+                const cp = cell_raws[gx].codepoint();
+                if (cp == 0) continue;
+                const idx = (try self.font_grid.getIndex(
+                    self.alloc,
+                    cp,
+                    font.cell_grid.fontStyle(style),
+                    null,
+                )) orelse continue;
+                const gi = glyph: {
+                    self.font_grid.lock.lockUncancelable(global.io());
+                    defer self.font_grid.lock.unlock(global.io());
+                    const face = try self.font_grid.resolver.collection.getFace(idx);
+                    break :glyph (face.glyphIndex(cp) orelse null);
+                } orelse continue;
+                _ = try self.addGlyphIndex(
+                    gx,
+                    y,
+                    cols,
+                    cell_raws,
+                    idx,
+                    gi,
+                    0,
+                    0,
+                    color,
+                    alpha,
+                    .letter,
+                    1,
                 );
-                break;
             }
         }
 
@@ -3573,7 +3611,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     @as(usize, x) + @as(usize, sc.x),
                 );
                 if (gx >= cell_raws.len) continue;
-                try self.addGlyphIndex(
+                _ = try self.addGlyphIndex(
                     gx,
                     y,
                     cols,

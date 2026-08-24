@@ -867,7 +867,10 @@ pub const Face = struct {
 
         const advance = f26dot6ToF64(glyph.*.metrics.horiAdvance);
         const box_wf: f64 = @floatFromInt(box_w);
-        const pen_x = @max(0, (box_wf - advance) * 0.5);
+        const pen_x = if (clip_cols > 1)
+            0
+        else
+            @max(0, (box_wf - advance) * 0.5);
         const baseline: i32 = @intCast(metrics.cell_baseline);
 
         const dest_x: i32 = @as(i32, @intFromFloat(@floor(pen_x))) + glyph.*.bitmap_left;

@@ -589,6 +589,52 @@ test "collect programming hides arrow only" {
     try testing.expectEqual(@as(usize, 1), testdata.shaper.shape_calls);
 }
 
+test "coverage raster for == and => has ink" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var testdata = try testShaper(alloc, &.{});
+    defer testdata.deinit();
+
+    var atlas = try font.Atlas.init(alloc, 512, .grayscale);
+    defer atlas.deinit(alloc);
+
+    const cases = [_][]const u8{ "==", "=>", "!=" };
+    for (cases) |text| {
+        var hide: [2]u8 = undefined;
+        var spans: std.ArrayListUnmanaged(Span) = .empty;
+        defer {
+            deinitSpans(alloc, &spans);
+            spans.deinit(alloc);
+        }
+
+        try collectRow(alloc, &testdata, text, .programming, &hide, &spans);
+        try testing.expectEqual(@as(usize, 1), spans.items.len);
+        const span = spans.items[0];
+
+        testdata.grid.lock.lockUncancelable(testing.io);
+        defer testdata.grid.lock.unlock(testing.io);
+        const face = try testdata.grid.resolver.collection.getFace(span.font_index);
+
+        var ink = false;
+        for (span.glyphs) |sc| {
+            if (sc.glyph_index == 0) continue;
+            const g = try face.renderGlyph(
+                alloc,
+                &atlas,
+                sc.glyph_index,
+                .{
+                    .grid_metrics = testdata.grid.metrics,
+                    .cell_box = true,
+                    .clip_cols = @intCast(span.n),
+                },
+            );
+            if (g.width > 0 and g.height > 0) ink = true;
+        }
+        try testing.expect(ink);
+    }
+}
+
 test "collect on hides arrow only" {
     const testing = std.testing;
     const alloc = testing.allocator;

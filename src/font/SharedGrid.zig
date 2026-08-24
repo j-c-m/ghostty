@@ -476,16 +476,18 @@ const GlyphKey = struct {
 
     const Context = struct {
         pub fn hash(_: Context, key: GlyphKey) u64 {
-            // Packed is a u64 but std.hash.int improves uniformity and
-            // avoids collisions in our hashmap.
-            const packed_key = Packed.from(key);
-            return std.hash.int(@as(u64, @bitCast(packed_key)));
+            var hasher = std.hash.Wyhash.init(0);
+            std.hash.autoHash(&hasher, Packed.from(key));
+            std.hash.autoHash(&hasher, key.opts.cell_box);
+            std.hash.autoHash(&hasher, key.opts.clip_cols);
+            return hasher.final();
         }
 
         pub fn eql(_: Context, a: GlyphKey, b: GlyphKey) bool {
-            // Packed checks glyphs but in most cases the glyphs are NOT
-            // equal so the first check leads to increased throughput.
-            return a.glyph == b.glyph and Packed.from(a) == Packed.from(b);
+            return a.glyph == b.glyph and
+                Packed.from(a) == Packed.from(b) and
+                a.opts.cell_box == b.opts.cell_box and
+                a.opts.clip_cols == b.opts.clip_cols;
         }
     };
 

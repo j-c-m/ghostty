@@ -305,6 +305,10 @@ pub const Face = struct {
         // And whether it's (probably) a bitmap (sbix).
         const sbix = is_color and self.color != null and self.color.?.sbix;
 
+        if (opts.cell_box and !is_color) {
+            return try self.renderGlyphCellBox(alloc, atlas, glyphs[0], opts);
+        }
+
         // If we're rendering a synthetic bold then we will gain 50% of
         // the line width on every edge, which means we should increase
         // our width and height by the line width and subtract half from
@@ -561,6 +565,120 @@ pub const Face = struct {
             .height = px_height,
             .offset_x = offset_x,
             .offset_y = offset_y,
+            .atlas_x = region.x,
+            .atlas_y = region.y,
+        };
+    }
+
+    /// Rasterize `glyph` into a cell-sized (or N-cell) gray tile and clip
+    /// overflow. The quad is the cell: bearings (0, cell_height).
+    fn renderGlyphCellBox(
+        self: Face,
+        alloc: Allocator,
+        atlas: *font.Atlas,
+        glyph: macos.graphics.Glyph,
+        opts: font.Glyph.RenderOptions,
+    ) !font.Glyph {
+        const metrics = opts.grid_metrics;
+        const clip_cols: u32 = @max(1, opts.clip_cols);
+        const box_w: u32 = metrics.cell_width * clip_cols;
+        const box_h: u32 = metrics.cell_height;
+        if (box_w == 0 or box_h == 0) {
+            return .{
+                .width = 0,
+                .height = 0,
+                .offset_x = 0,
+                .offset_y = 0,
+                .atlas_x = 0,
+                .atlas_y = 0,
+            };
+        }
+
+        if (atlas.format.depth() != 1) return error.InvalidAtlasFormat;
+
+        const buf = try alloc.alloc(u8, box_w * box_h);
+        defer alloc.free(buf);
+        @memset(buf, 0);
+
+        const space = try macos.graphics.ColorSpace.createNamed(.linearGray);
+        defer space.release();
+
+        const context = macos.graphics.BitmapContext.context;
+        const ctx = try macos.graphics.BitmapContext.create(
+            buf,
+            box_w,
+            box_h,
+            8,
+            box_w,
+            space,
+            @intFromEnum(macos.graphics.ImageAlphaInfo.only),
+        );
+        defer context.release(ctx);
+
+        context.setGrayFillColor(ctx, 0, 0);
+        context.fillRect(ctx, .{
+            .origin = .{ .x = 0, .y = 0 },
+            .size = .{
+                .width = @floatFromInt(box_w),
+                .height = @floatFromInt(box_h),
+            },
+        });
+
+        context.setAllowsFontSmoothing(ctx, true);
+        context.setShouldSmoothFonts(ctx, opts.thicken);
+        context.setAllowsFontSubpixelPositioning(ctx, true);
+        context.setShouldSubpixelPositionFonts(ctx, true);
+        context.setAllowsFontSubpixelQuantization(ctx, false);
+        context.setShouldSubpixelQuantizeFonts(ctx, false);
+        context.setAllowsAntialiasing(ctx, true);
+        context.setShouldAntialias(ctx, true);
+
+        const strength: f64 = @floatFromInt(opts.thicken_strength);
+        context.setGrayFillColor(ctx, strength / 255.0, 1);
+        context.setGrayStrokeColor(ctx, strength / 255.0, 1);
+
+        if (self.synthetic_bold) |line_width| {
+            context.setTextDrawingMode(ctx, .fill_stroke);
+            context.setLineWidth(ctx, line_width);
+        }
+
+        var glyphs = [_]macos.graphics.Glyph{glyph};
+        const advance = self.font.getAdvancesForGlyphs(.horizontal, &glyphs, null);
+        const box_wf: f64 = @floatFromInt(box_w);
+        const pen_x = @max(0, (box_wf - advance) * 0.5);
+        const pen_y: f64 = @floatFromInt(metrics.cell_baseline);
+
+        self.font.drawGlyphs(&glyphs, &.{.{
+            .x = pen_x,
+            .y = pen_y,
+        }}, ctx);
+
+        var ink = false;
+        for (buf) |p| {
+            if (p != 0) {
+                ink = true;
+                break;
+            }
+        }
+        if (!ink) {
+            return .{
+                .width = 0,
+                .height = 0,
+                .offset_x = 0,
+                .offset_y = 0,
+                .atlas_x = 0,
+                .atlas_y = 0,
+            };
+        }
+
+        const region = try atlas.reserve(alloc, box_w, box_h);
+        atlas.set(region, buf);
+
+        return .{
+            .width = box_w,
+            .height = box_h,
+            .offset_x = 0,
+            .offset_y = @intCast(box_h),
             .atlas_x = region.x,
             .atlas_y = region.y,
         };
@@ -1088,6 +1206,78 @@ test "variable" {
             .{ .grid_metrics = font.Metrics.calc(face.getMetrics()) },
         );
     }
+}
+
+test "cell-box letter fills the cell" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const testFont = font.embedded.jetbrains_mono;
+
+    var atlas = try font.Atlas.init(alloc, 512, .grayscale);
+    defer atlas.deinit(alloc);
+
+    var lib = try font.Library.init(alloc);
+    defer lib.deinit();
+
+    var face = try Face.init(lib, testFont, .{ .size = .{ .points = 13 } });
+    defer face.deinit();
+
+    const metrics = font.Metrics.calc(face.getMetrics());
+    const glyph = try face.renderGlyph(
+        alloc,
+        &atlas,
+        face.glyphIndex('A').?,
+        .{
+            .grid_metrics = metrics,
+            .cell_box = true,
+            .clip_cols = 1,
+        },
+    );
+    try testing.expectEqual(metrics.cell_width, glyph.width);
+    try testing.expectEqual(metrics.cell_height, glyph.height);
+    try testing.expectEqual(@as(i32, 0), glyph.offset_x);
+    try testing.expectEqual(@as(i32, @intCast(metrics.cell_height)), glyph.offset_y);
+
+    const span = try face.renderGlyph(
+        alloc,
+        &atlas,
+        face.glyphIndex('A').?,
+        .{
+            .grid_metrics = metrics,
+            .cell_box = true,
+            .clip_cols = 2,
+        },
+    );
+    try testing.expectEqual(metrics.cell_width * 2, span.width);
+    try testing.expectEqual(metrics.cell_height, span.height);
+}
+
+test "cell-box clips italic overflow" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var atlas = try font.Atlas.init(alloc, 512, .grayscale);
+    defer atlas.deinit(alloc);
+
+    var lib = try font.Library.init(alloc);
+    defer lib.deinit();
+
+    var face = try Face.init(lib, font.embedded.italic, .{ .size = .{ .points = 13 } });
+    defer face.deinit();
+
+    const metrics = font.Metrics.calc(face.getMetrics());
+    const boxed = try face.renderGlyph(
+        alloc,
+        &atlas,
+        face.glyphIndex('f').?,
+        .{
+            .grid_metrics = metrics,
+            .cell_box = true,
+            .clip_cols = 1,
+        },
+    );
+    try testing.expectEqual(metrics.cell_width, boxed.width);
+    try testing.expectEqual(metrics.cell_height, boxed.height);
 }
 
 test "variable set variation" {

@@ -79,6 +79,15 @@ pub const RenderOptions = struct {
     /// CoreText only.
     thicken_strength: u8 = 255,
 
+    /// Rasterize into a clip box of `clip_cols` cells by one cell.
+    /// Overflow is clipped, not scaled. The packed atlas tile is the full
+    /// rectangle. Color glyphs ignore this and use the tight path.
+    cell_box: bool = false,
+
+    /// Width of the cell-box clip rectangle, in cells. Ignored unless
+    /// `cell_box` is true. Programming ligatures use values up to 4.
+    clip_cols: u8 = 1,
+
     /// See the `constraint` field.
     pub const Constraint = struct {
         /// Don't constrain the glyph in any way.

@@ -567,6 +567,32 @@ test "sprite face render all sprites" {
     try std.testing.expect(!diff); // There should be no diffs from reference.
 }
 
+test "U+2502 sprite equals cell height" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var atlas: font.Atlas = try .init(alloc, 128, .grayscale);
+    defer atlas.deinit(alloc);
+
+    var face: Face = .{
+        .metrics = .calc(.{
+            .px_per_em = 16,
+            .cell_width = 8.0,
+            .ascent = 12.0,
+            .descent = -4.0,
+            .line_gap = 0.0,
+        }),
+    };
+
+    const glyph = try face.renderGlyph(
+        alloc,
+        &atlas,
+        0x2502,
+        .{ .grid_metrics = face.metrics },
+    );
+    try testing.expectEqual(face.metrics.cell_height, glyph.height);
+}
+
 test "full height cursor sprites respect cursor height metric" {
     const testing = std.testing;
     const alloc = testing.allocator;

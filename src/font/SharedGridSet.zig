@@ -504,6 +504,7 @@ pub const DerivedConfig = struct {
     @"adjust-box-thickness": ?Metrics.Modifier,
     @"adjust-icon-height": ?Metrics.Modifier,
     @"freetype-load-flags": font.face.FreetypeLoadFlags,
+    @"experimental-cell-grid": bool,
 
     /// Initialize a DerivedConfig. The config should be either a
     /// config.Config or another DerivedConfig to clone from.
@@ -544,6 +545,7 @@ pub const DerivedConfig = struct {
             .@"adjust-box-thickness" = config.@"adjust-box-thickness",
             .@"adjust-icon-height" = config.@"adjust-icon-height",
             .@"freetype-load-flags" = if (font.face.FreetypeLoadFlags != void) config.@"freetype-load-flags" else {},
+            .@"experimental-cell-grid" = config.@"experimental-cell-grid",
 
             // This must be last so the arena contains all our allocations
             // from above since Zig does assignment in order.
@@ -586,6 +588,9 @@ pub const Key = struct {
     /// The freetype load flags configuration, only non-void if the
     /// freetype backend is enabled.
     freetype_load_flags: font.face.FreetypeLoadFlags = font.face.freetype_load_flags_default,
+
+    /// Cell-box tiles must not share an atlas with tight tiles.
+    experimental_cell_grid: bool = false,
 
     const style_offsets_len = std.enums.directEnumArrayLen(Style, 0);
     const StyleOffsets = [style_offsets_len]usize;
@@ -714,6 +719,7 @@ pub const Key = struct {
                 config.@"freetype-load-flags"
             else
                 font.face.freetype_load_flags_default,
+            .experimental_cell_grid = config.@"experimental-cell-grid",
         };
     }
 
@@ -744,6 +750,7 @@ pub const Key = struct {
         self.codepoint_map.hash(hasher);
         autoHash(hasher, self.metric_modifiers.count());
         autoHash(hasher, self.freetype_load_flags);
+        autoHash(hasher, self.experimental_cell_grid);
         if (self.metric_modifiers.count() > 0) {
             inline for (@typeInfo(Metrics.Key).@"enum".fields) |field| {
                 const key = @field(Metrics.Key, field.name);
@@ -817,6 +824,28 @@ test "Key different font DPI" {
     defer k2.deinit();
 
     try testing.expect(k.hashcode() != k2.hashcode());
+}
+
+test "Key different experimental-cell-grid" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    var keycfg = try DerivedConfig.init(alloc, &cfg);
+    defer keycfg.deinit();
+
+    var k = try Key.init(alloc, &keycfg, .{ .points = 12 });
+    defer k.deinit();
+
+    cfg.@"experimental-cell-grid" = true;
+    var keycfg_on = try DerivedConfig.init(alloc, &cfg);
+    defer keycfg_on.deinit();
+
+    var k_on = try Key.init(alloc, &keycfg_on, .{ .points = 12 });
+    defer k_on.deinit();
+
+    try testing.expect(k.hashcode() != k_on.hashcode());
 }
 
 test SharedGridSet {

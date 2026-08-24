@@ -377,6 +377,35 @@ language: ?[:0]const u8 = null,
 /// Available since: 1.2.0
 @"font-shaping-break": FontShapingBreak = .{},
 
+/// Experimental: cell-boxed letter tiles and table-driven programming ligatures.
+///
+/// This is a local experiment, not a Ghostty default. When `false` (the
+/// default), rendering is unchanged: tight glyph bounding boxes and full-run
+/// shaping.
+///
+/// When `true`, ASCII letters are painted from cmap glyph indices instead of
+/// shaping every run. `experimental-ligatures` selects the ligature policy.
+/// Emoji, graphemes, sprites, and Kitty graphics stay on the existing path.
+///
+/// Surfaces with different values do not share a font atlas.
+@"experimental-cell-grid": bool = false,
+
+/// Ligature policy when `experimental-cell-grid` is `true`. Ignored when
+/// `experimental-cell-grid` is `false`.
+///
+/// Valid values:
+///
+///  * `off` - Never shape. Every remaining narrow scalar is a cmap letter.
+///  * `programming` - (default) Scan the visible row for JetBrains Mono's
+///    official `calt` ASCII ligatures. Shape only those spans. `hello` is
+///    never shaped.
+///  * `on` - Shape runs as today, but still paint 1:1 cmap-matching cells
+///    as letters. Only cmap-mismatch spans get coverage ink.
+///
+/// `font-feature` applies only to shaped spans. `-calt` prevents `=>` from
+/// confirming.
+@"experimental-ligatures": ExperimentalLigatures = .programming,
+
 /// What color space to use when performing alpha blending.
 ///
 /// This affects the appearance of text and of any images with transparency.
@@ -8647,6 +8676,13 @@ pub const FontSyntheticStyle = packed struct {
 /// See "font-shaping-break" for documentation
 pub const FontShapingBreak = packed struct {
     cursor: bool = true,
+};
+
+/// See `experimental-ligatures` for documentation.
+pub const ExperimentalLigatures = enum {
+    off,
+    programming,
+    on,
 };
 
 /// See "link" for documentation.

@@ -27,6 +27,7 @@ pub const MiddleClickAction = Config.MiddleClickAction;
 pub const CustomShaderAnimation = Config.CustomShaderAnimation;
 pub const FontSyntheticStyle = Config.FontSyntheticStyle;
 pub const FontShapingBreak = Config.FontShapingBreak;
+pub const ExperimentalLigatures = Config.ExperimentalLigatures;
 pub const FontStyle = Config.FontStyle;
 pub const FreetypeLoadFlags = Config.FreetypeLoadFlags;
 pub const Keybinds = Config.Keybinds;

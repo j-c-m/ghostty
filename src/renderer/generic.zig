@@ -178,6 +178,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         font_shaper: font.Shaper,
         font_shaper_cache: font.ShaperCache,
 
+        /// Reused by the experimental cell-grid path. Empty when the flag is off.
+        cell_grid_hide: std.ArrayListUnmanaged(u8) = .empty,
+        cell_grid_spans: std.ArrayListUnmanaged(font.cell_grid.Span) = .empty,
+
         /// The images that we may render.
         images: ImageState = .empty,
 
@@ -590,6 +594,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             background_blur: configpkg.Config.BackgroundBlur,
             scroll_to_bottom_on_output: bool,
             custom_shader_animation: configpkg.CustomShaderAnimation,
+            experimental_cell_grid: bool,
+            experimental_ligatures: configpkg.ExperimentalLigatures,
 
             pub fn init(
                 alloc_gpa: Allocator,
@@ -665,6 +671,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .background_blur = config.@"background-blur",
                     .scroll_to_bottom_on_output = config.@"scroll-to-bottom".output,
                     .custom_shader_animation = config.@"custom-shader-animation",
+                    .experimental_cell_grid = config.@"experimental-cell-grid",
+                    .experimental_ligatures = config.@"experimental-ligatures",
                     .arena = arena,
                 };
             }
@@ -827,6 +835,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             self.font_shaper.deinit();
             self.font_shaper_cache.deinit(self.alloc);
+            font.cell_grid.deinitSpans(self.alloc, &self.cell_grid_spans);
+            self.cell_grid_spans.deinit(self.alloc);
+            self.cell_grid_hide.deinit(self.alloc);
 
             self.config.deinit();
 
@@ -2768,25 +2779,56 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 },
             }
 
-            // Iterator of runs for shaping.
-            var run_iter_opts: font.shape.RunOptions = .{
-                .grid = self.font_grid,
-                .cells = cells_slice,
-                .selection = if (selection) |s| s else null,
-
-                // We want to do font shaping as long as the cursor is
-                // visible on this viewport.
-                .cursor_x = cursor_x: {
-                    const vp = state.cursor.viewport orelse break :cursor_x null;
-                    if (vp.y != y) break :cursor_x null;
-                    break :cursor_x vp.x;
-                },
+            const cell_grid = self.config.experimental_cell_grid;
+            const cursor_x: ?usize = cursor_x: {
+                const vp = state.cursor.viewport orelse break :cursor_x null;
+                if (vp.y != y) break :cursor_x null;
+                break :cursor_x vp.x;
             };
-            run_iter_opts.applyBreakConfig(self.config.font_shaping_break);
-            var run_iter = self.font_shaper.runIterator(run_iter_opts);
-            var shaper_run: ?font.shape.TextRun = try run_iter.next(self.alloc);
+
+            if (cell_grid) {
+                try self.cell_grid_hide.resize(self.alloc, cells_len);
+                const mode: font.cell_grid.Ligatures = switch (self.config.experimental_ligatures) {
+                    .off => .off,
+                    .programming => .programming,
+                    .on => .on,
+                };
+                const break_cursor = if (self.config.font_shaping_break.cursor)
+                    cursor_x
+                else
+                    null;
+                var row_slice = cells_slice;
+                row_slice.len = cells_len;
+                try font.cell_grid.collect(
+                    self.alloc,
+                    row_slice,
+                    mode,
+                    &self.font_shaper,
+                    self.font_grid,
+                    &self.font_shaper_cache,
+                    self.cell_grid_hide.items,
+                    &self.cell_grid_spans,
+                    break_cursor,
+                );
+            }
+
+            // Iterator of runs for shaping. The cell-grid path must not
+            // hash full-row runs; flag off keeps this existing iterator.
+            var run_iter: font.shape.RunIterator = undefined;
+            var shaper_run: ?font.shape.TextRun = null;
             var shaper_cells: ?[]const font.shape.Cell = null;
             var shaper_cells_i: usize = 0;
+            if (!cell_grid) {
+                var run_iter_opts: font.shape.RunOptions = .{
+                    .grid = self.font_grid,
+                    .cells = cells_slice,
+                    .selection = if (selection) |s| s else null,
+                    .cursor_x = cursor_x,
+                };
+                run_iter_opts.applyBreakConfig(self.config.font_shaping_break);
+                run_iter = self.font_shaper.runIterator(run_iter_opts);
+                shaper_run = try run_iter.next(self.alloc);
+            }
 
             for (
                 0..,
@@ -3079,77 +3121,95 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     );
                 };
 
-                // If we're at or past the end of our shaper run then
-                // we need to get the next run from the run iterator.
-                if (shaper_cells != null and shaper_cells_i >= shaper_cells.?.len) {
+                if (cell_grid) {
+                    self.addCellGridGlyph(
+                        @intCast(x),
+                        @intCast(y),
+                        state.cols,
+                        cells_raw,
+                        cells_slice,
+                        style,
+                        fg,
+                        alpha,
+                    ) catch |err| {
+                        log.warn(
+                            "error adding glyph to cell, will be invalid x={} y={}, err={}",
+                            .{ x, y, err },
+                        );
+                    };
+                } else if (shaper_cells != null and shaper_cells_i >= shaper_cells.?.len) {
+                    // If we're at or past the end of our shaper run then
+                    // we need to get the next run from the run iterator.
                     shaper_run = try run_iter.next(self.alloc);
                     shaper_cells = null;
                     shaper_cells_i = 0;
                 }
 
-                if (shaper_run) |run| glyphs: {
-                    // If we haven't shaped this run yet, do so.
-                    shaper_cells = shaper_cells orelse
-                        // Try to read the cells from the shaping cache if we can.
-                        self.font_shaper_cache.get(run) orelse
-                        cache: {
-                            // Otherwise we have to shape them.
-                            const new_cells = try self.font_shaper.shape(run);
+                if (!cell_grid) {
+                    if (shaper_run) |run| glyphs: {
+                        // If we haven't shaped this run yet, do so.
+                        shaper_cells = shaper_cells orelse
+                            // Try to read the cells from the shaping cache if we can.
+                            self.font_shaper_cache.get(run) orelse
+                            cache: {
+                                // Otherwise we have to shape them.
+                                const new_cells = try self.font_shaper.shape(run);
 
-                            // Try to cache them. If caching fails for any reason we
-                            // continue because it is just a performance optimization,
-                            // not a correctness issue.
-                            self.font_shaper_cache.put(
-                                self.alloc,
-                                run,
-                                new_cells,
-                            ) catch |err| {
-                                log.warn(
-                                    "error caching font shaping results err={}",
-                                    .{err},
-                                );
+                                // Try to cache them. If caching fails for any reason we
+                                // continue because it is just a performance optimization,
+                                // not a correctness issue.
+                                self.font_shaper_cache.put(
+                                    self.alloc,
+                                    run,
+                                    new_cells,
+                                ) catch |err| {
+                                    log.warn(
+                                        "error caching font shaping results err={}",
+                                        .{err},
+                                    );
+                                };
+
+                                // The cells we get from direct shaping are always owned
+                                // by the shaper and valid until the next shaping call so
+                                // we can safely use them.
+                                break :cache new_cells;
                             };
 
-                            // The cells we get from direct shaping are always owned
-                            // by the shaper and valid until the next shaping call so
-                            // we can safely use them.
-                            break :cache new_cells;
-                        };
+                        const shaped_cells = shaper_cells orelse break :glyphs;
 
-                    const shaped_cells = shaper_cells orelse break :glyphs;
+                        // If there are no shaper cells for this run, ignore it.
+                        // This can occur for runs of empty cells, and is fine.
+                        if (shaped_cells.len == 0) break :glyphs;
 
-                    // If there are no shaper cells for this run, ignore it.
-                    // This can occur for runs of empty cells, and is fine.
-                    if (shaped_cells.len == 0) break :glyphs;
+                        // If we encounter a shaper cell to the left of the current
+                        // cell then we have some problems. This logic relies on x
+                        // position monotonically increasing.
+                        assert(run.offset + shaped_cells[shaper_cells_i].x >= x);
 
-                    // If we encounter a shaper cell to the left of the current
-                    // cell then we have some problems. This logic relies on x
-                    // position monotonically increasing.
-                    assert(run.offset + shaped_cells[shaper_cells_i].x >= x);
+                        // NOTE: An assumption is made here that a single cell will never
+                        // be present in more than one shaper run. If that assumption is
+                        // violated, this logic breaks.
 
-                    // NOTE: An assumption is made here that a single cell will never
-                    // be present in more than one shaper run. If that assumption is
-                    // violated, this logic breaks.
-
-                    while (shaper_cells_i < shaped_cells.len and
-                        run.offset + shaped_cells[shaper_cells_i].x == x) : ({
-                        shaper_cells_i += 1;
-                    }) {
-                        self.addGlyph(
-                            @intCast(x),
-                            @intCast(y),
-                            state.cols,
-                            cells_raw,
-                            shaped_cells[shaper_cells_i],
-                            shaper_run.?,
-                            fg,
-                            alpha,
-                        ) catch |err| {
-                            log.warn(
-                                "error adding glyph to cell, will be invalid x={} y={}, err={}",
-                                .{ x, y, err },
-                            );
-                        };
+                        while (shaper_cells_i < shaped_cells.len and
+                            run.offset + shaped_cells[shaper_cells_i].x == x) : ({
+                            shaper_cells_i += 1;
+                        }) {
+                            self.addGlyph(
+                                @intCast(x),
+                                @intCast(y),
+                                state.cols,
+                                cells_raw,
+                                shaped_cells[shaper_cells_i],
+                                shaper_run.?,
+                                fg,
+                                alpha,
+                            ) catch |err| {
+                                log.warn(
+                                    "error adding glyph to cell, will be invalid x={} y={}, err={}",
+                                    .{ x, y, err },
+                                );
+                            };
+                        }
                     }
                 }
 
@@ -3283,36 +3343,72 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             color: terminal.color.RGB,
             alpha: u8,
         ) !void {
+            try self.addGlyphIndex(
+                x,
+                y,
+                cols,
+                cell_raws,
+                shaper_run.font_index,
+                shaper_cell.glyph_index,
+                shaper_cell.x_offset,
+                shaper_cell.y_offset,
+                color,
+                alpha,
+                .shaped,
+                1,
+            );
+        }
+
+        const GlyphPath = enum { shaped, letter };
+
+        fn addGlyphIndex(
+            self: *Self,
+            x: terminal.size.CellCountInt,
+            y: terminal.size.CellCountInt,
+            cols: usize,
+            cell_raws: []const terminal.page.Cell,
+            font_index: font.Collection.Index,
+            glyph_index: u32,
+            x_offset: i16,
+            y_offset: i16,
+            color: terminal.color.RGB,
+            alpha: u8,
+            path: GlyphPath,
+            clip_cols: u8,
+        ) !void {
             const cell = cell_raws[x];
             const cp = cell.codepoint();
 
-            // Render
+            const constraint: font.Glyph.RenderOptions.Constraint = switch (path) {
+                .shaped => getConstraint(cp) orelse
+                    if (cellpkg.isSymbol(cp)) .{ .size = .fit } else .none,
+                .letter => .none,
+            };
+
+            const cell_box = path == .letter;
             const render = try self.font_grid.renderGlyph(
                 self.alloc,
-                shaper_run.font_index,
-                shaper_cell.glyph_index,
+                font_index,
+                glyph_index,
                 .{
                     .grid_metrics = self.grid_metrics,
                     .thicken = self.config.font_thicken,
                     .thicken_strength = self.config.font_thicken_strength,
-                    .cell_width = cell.gridWidth(),
-                    // If there's no Nerd Font constraint for this codepoint
-                    // then, if it's a symbol, we constrain it to fit inside
-                    // its cell(s), we don't modify the alignment at all.
-                    .constraint = getConstraint(cp) orelse
-                        if (cellpkg.isSymbol(cp)) .{
-                            .size = .fit,
-                        } else .none,
+                    .cell_width = if (cell_box)
+                        @intCast(@min(clip_cols, 3))
+                    else
+                        cell.gridWidth(),
+                    .constraint = constraint,
                     .constraint_width = constraintWidth(
                         cell_raws,
                         x,
                         cols,
                     ),
+                    .cell_box = cell_box,
+                    .clip_cols = if (cell_box) @max(clip_cols, 1) else 1,
                 },
             );
 
-            // If the glyph is 0 width or height, it will be invisible
-            // when drawn, so don't bother adding it to the buffer.
             if (render.glyph.width == 0 or render.glyph.height == 0) {
                 return;
             }
@@ -3328,10 +3424,170 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
-                    @intCast(render.glyph.offset_x + shaper_cell.x_offset),
-                    @intCast(render.glyph.offset_y + shaper_cell.y_offset),
+                    @intCast(render.glyph.offset_x + x_offset),
+                    @intCast(render.glyph.offset_y + y_offset),
                 },
             });
+        }
+
+        fn addCellGridGlyph(
+            self: *Self,
+            x: terminal.size.CellCountInt,
+            y: terminal.size.CellCountInt,
+            cols: usize,
+            cell_raws: []const terminal.page.Cell,
+            cells: std.MultiArrayList(terminal.RenderState.Cell).Slice,
+            style: terminal.Style,
+            color: terminal.color.RGB,
+            alpha: u8,
+        ) !void {
+            const cell = cell_raws[x];
+            switch (cell.wide) {
+                .spacer_head, .spacer_tail => return,
+                .narrow, .wide => {},
+            }
+
+            if (x < self.cell_grid_hide.items.len and
+                self.cell_grid_hide.items[x] != 0)
+            {
+                if (font.cell_grid.spanStartingAt(self.cell_grid_spans.items, x)) |span| {
+                    try self.addCoverageSpan(x, y, cols, cell_raws, span, color, alpha);
+                }
+                return;
+            }
+
+            const cp = cell.codepoint();
+            if (cp == 0 and !cell.hasGrapheme()) return;
+
+            if (cell.hasGrapheme() or
+                cp == terminal.kitty.graphics.unicode.placeholder)
+            {
+                try self.addShapedCell(x, y, cols, cell_raws, cells, color, alpha);
+                return;
+            }
+
+            const idx = (try self.font_grid.getIndex(
+                self.alloc,
+                cp,
+                font.cell_grid.fontStyle(style),
+                null,
+            )) orelse return;
+
+            if (idx.special()) |sp| {
+                if (sp == .sprite) {
+                    try self.addGlyphIndex(
+                        x,
+                        y,
+                        cols,
+                        cell_raws,
+                        idx,
+                        cp,
+                        0,
+                        0,
+                        color,
+                        alpha,
+                        .shaped,
+                        1,
+                    );
+                    return;
+                }
+            }
+
+            const gi, const is_color = glyph: {
+                self.font_grid.lock.lockUncancelable(global.io());
+                defer self.font_grid.lock.unlock(global.io());
+                const face = try self.font_grid.resolver.collection.getFace(idx);
+                const gi = face.glyphIndex(cp) orelse return;
+                break :glyph .{ gi, face.isColorGlyph(gi) };
+            };
+
+            try self.addGlyphIndex(
+                x,
+                y,
+                cols,
+                cell_raws,
+                idx,
+                gi,
+                0,
+                0,
+                color,
+                alpha,
+                if (is_color) .shaped else .letter,
+                1,
+            );
+        }
+
+        fn addCoverageSpan(
+            self: *Self,
+            x: terminal.size.CellCountInt,
+            y: terminal.size.CellCountInt,
+            cols: usize,
+            cell_raws: []const terminal.page.Cell,
+            span: font.cell_grid.Span,
+            color: terminal.color.RGB,
+            alpha: u8,
+        ) !void {
+            const clip: u8 = @intCast(@max(@as(u16, 1), span.n));
+            for (span.glyphs) |sc| {
+                try self.addGlyphIndex(
+                    x,
+                    y,
+                    cols,
+                    cell_raws,
+                    span.font_index,
+                    sc.glyph_index,
+                    0,
+                    0,
+                    color,
+                    alpha,
+                    .letter,
+                    clip,
+                );
+                break;
+            }
+        }
+
+        fn addShapedCell(
+            self: *Self,
+            x: terminal.size.CellCountInt,
+            y: terminal.size.CellCountInt,
+            cols: usize,
+            cell_raws: []const terminal.page.Cell,
+            cells: std.MultiArrayList(terminal.RenderState.Cell).Slice,
+            color: terminal.color.RGB,
+            alpha: u8,
+        ) !void {
+            const n: usize = if (cell_raws[x].wide == .wide) 2 else 1;
+            const end = @min(cells.len, @as(usize, x) + n);
+            const shaped = try font.cell_grid.shapeRange(
+                self.alloc,
+                cells,
+                &self.font_shaper,
+                self.font_grid,
+                &self.font_shaper_cache,
+                x,
+                end - x,
+            ) orelse return;
+            for (shaped.cells) |sc| {
+                const gx: terminal.size.CellCountInt = @intCast(
+                    @as(usize, x) + @as(usize, sc.x),
+                );
+                if (gx >= cell_raws.len) continue;
+                try self.addGlyphIndex(
+                    gx,
+                    y,
+                    cols,
+                    cell_raws,
+                    shaped.run.font_index,
+                    sc.glyph_index,
+                    sc.x_offset,
+                    sc.y_offset,
+                    color,
+                    alpha,
+                    .shaped,
+                    1,
+                );
+            }
         }
 
         fn addCursor(

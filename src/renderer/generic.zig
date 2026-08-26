@@ -1191,10 +1191,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             }
 
-            // If we're not visible, then we want to stop the display link
-            // because it is a waste of resources and we can move to pure
-            // change-driven updates.
-            if (self.visible and self.focused) {
+            // Keep the link running only while a focused, visible surface
+            // has a frame to paint. Idle, unfocused, and occluded surfaces
+            // stop the link and stay change-driven so vsync does not tick
+            // for no-op.
+            if (self.visible and self.focused and
+                (self.cells_rebuilt or self.animationWake() != null))
+            {
                 display_link.start() catch {};
             } else {
                 display_link.stop() catch {};
@@ -1593,6 +1596,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Update custom shader uniforms that depend on terminal state.
                 self.updateCustomShaderUniformsFromState();
             }
+
+            self.syncDisplayLink(null, null);
         }
 
         /// Draw the frame to the screen.
@@ -1670,6 +1675,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // apprt may be swapping buffers and display an outdated frame
                 // if we don't draw something new.
                 try self.api.presentLastTarget();
+                self.syncDisplayLink(null, null);
                 return;
             }
             self.cells_rebuilt = false;
@@ -1903,6 +1909,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     });
                 }
             }
+
+            self.syncDisplayLink(null, null);
         }
 
         // Callback from the graphics API when a frame is completed.

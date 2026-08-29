@@ -211,9 +211,13 @@ pub const LoadingImage = struct {
         }
 
         // Since we're only supporting posix then max_path_bytes should
-        // be enough to stack allocate the path.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const pathz = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return error.InvalidData;
+        // be enough to stack allocate the path. Extra byte is for a
+        // leading '/' when the client omitted it (Darwin requires it).
+        var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+        const pathz = if (path.len > 0 and path[0] != '/')
+            std.fmt.bufPrintZ(&buf, "/{s}", .{path}) catch return error.InvalidData
+        else
+            std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return error.InvalidData;
 
         const fd = std.c.shm_open(pathz, @as(c_int, @bitCast(std.c.O{ .ACCMODE = .RDONLY })), @as(u16, 0));
         switch (std.posix.errno(fd)) {

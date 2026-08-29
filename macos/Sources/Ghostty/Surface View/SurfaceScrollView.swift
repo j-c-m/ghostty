@@ -12,10 +12,12 @@ import Combine
 /// - `scrollView`: The outermost NSScrollView that manages scrollbar rendering and behavior
 /// - `documentView`: A blank NSView whose height represents total scrollback (in pixels)
 /// - `surfaceView`: The actual Ghostty renderer, positioned to fill the visible rect
+/// - `progressChrome`: 2px OSC 9;4 hairline, a sibling of `scrollView` (SurfaceView is layer-hosting)
 class SurfaceScrollView: NSView {
     private let scrollView: NSScrollView
     private let documentView: NSView
     private let surfaceView: Ghostty.SurfaceView
+    private let progressChrome = SurfaceProgressChrome()
     private var observers: [NSObjectProtocol] = []
     private var cancellables: Set<AnyCancellable> = []
     private var isLiveScrolling = false
@@ -58,8 +60,17 @@ class SurfaceScrollView: NSView {
 
         super.init(frame: .zero)
 
-        // Our scroll view is our only view
+        // The scroll view fills this view. Progress chrome is a sibling, not a
+        // SurfaceView subview: SurfaceView is layer-hosting (IOSurfaceLayer).
         addSubview(scrollView)
+        addSubview(progressChrome)
+        progressChrome.setReport(surfaceView.progressReport)
+        surfaceView.$progressReport
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] report in
+                self?.progressChrome.setReport(report)
+            }
+            .store(in: &cancellables)
 
         // Apply initial scrollbar settings
         synchronizeAppearance()
@@ -170,6 +181,14 @@ class SurfaceScrollView: NSView {
         // Fill entire bounds with scroll view
         scrollView.frame = bounds
         surfaceView.frame.size = scrollView.bounds.size
+
+        let hairline = SurfaceProgressChrome.hairlineHeight
+        progressChrome.frame = CGRect(
+            x: 0,
+            y: bounds.height - hairline,
+            width: bounds.width,
+            height: hairline
+        )
 
         // We only set the width of the documentView here, as the height depends
         // on the scrollbar state and is updated in synchronizeScrollView

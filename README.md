@@ -1,3 +1,16 @@
+> This is my daily driver
+> [Ghostty](https://github.com/ghostty-org/ghostty), until these patches
+> are upstreamed. Performance and efficiency enhancements, plus
+> smooth scrollback. Local patches over `main`:
+>
+> - macOS OSC 9;4 progress is a 2px layer sibling. Indeterminate is an
+>   opacity pulse, not a bouncing overlay on Metal.
+>   ([macos-progress-pulse](https://github.com/j-c-m/ghostty/tree/macos-progress-pulse))
+> - Optional inertial sub-cell scrollback (`smooth-scrollback`).
+>   ([smooth-scroll](https://github.com/j-c-m/ghostty/tree/smooth-scroll))
+> - Instanced cell backgrounds. Default-bg cells are skipped.
+>   ([renderer-instance-cell-bg](https://github.com/j-c-m/ghostty/tree/renderer-instance-cell-bg))
+
 <!-- LOGO -->
 <h1>
 <p align="center">

@@ -1187,6 +1187,7 @@ pub const Option = enum(c_int) {
     clipboard_write_max_bytes = 39,
     resize_pull_scrollback = 40,
     render_hold = 41,
+    scroll_row_frac = 42,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -1226,6 +1227,7 @@ pub const Option = enum(c_int) {
             .unknown_max_bytes,
             .clipboard_write_max_bytes,
             => ?*const usize,
+            .scroll_row_frac => ?*const f64,
             .selection => ?*const selection_c.CSelection,
             .default_cursor_style => ?*const TerminalCursorStyle,
             .default_cursor_blink => ?*const bool,
@@ -1440,6 +1442,9 @@ fn setTyped(
             if (value) |ptr| ptr.* else kitty_clipboard.max_write_size,
         .resize_pull_scrollback => wrapper.terminal.flags.resize_pull_scrollback =
             if (value) |ptr| ptr.* else true,
+        .scroll_row_frac => wrapper.terminal.setScrollRowFrac(
+            if (value) |ptr| ptr.* else 0,
+        ),
         .mode, .mode_default => {
             const config = (value orelse return .invalid_value).*;
             const mode = config.toMode() orelse return .invalid_value;
@@ -1579,6 +1584,7 @@ pub const TerminalData = enum(c_int) {
     vt_ground = 38,
     cursor_at_prompt = 39,
     clipboard_write_max_bytes = 40,
+    scroll_row_frac = 41,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: TerminalData) type {
@@ -1606,6 +1612,7 @@ pub const TerminalData = enum(c_int) {
             .clipboard_write_max_bytes,
             => usize,
             .width_px, .height_px => u32,
+            .scroll_row_frac => f64,
             .color_foreground,
             .color_background,
             .color_cursor,
@@ -1761,6 +1768,7 @@ fn getTyped(
             out.value = t.modes.get(mode);
         },
         .cursor_at_prompt => out.* = t.cursorIsAtPrompt(),
+        .scroll_row_frac => out.* = t.scrollRowFrac(),
     }
 
     return .success;
@@ -2383,6 +2391,37 @@ test "scroll_viewport row" {
     }
     try testing.expectEqual(Result.success, get(t, .scrollbar, @ptrCast(&scrollbar_data)));
     try testing.expectEqual(@as(u64, 2), scrollbar_data.offset);
+}
+
+test "scroll row frac get/set" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        10,
+        3,
+    ));
+    defer free(t);
+
+    vt_write(t, "A\r\nB\r\nC\r\nD\r\nE", 17);
+
+    var frac: f64 = 1;
+    try testing.expectEqual(Result.success, get(t, .scroll_row_frac, @ptrCast(&frac)));
+    try testing.expectEqual(@as(f64, 0), frac);
+
+    const set_frac: f64 = 0.25;
+    try testing.expectEqual(Result.success, set(t, .scroll_row_frac, @ptrCast(&set_frac)));
+    try testing.expectEqual(Result.success, get(t, .scroll_row_frac, @ptrCast(&frac)));
+    try testing.expectEqual(@as(f64, 0), frac);
+
+    scroll_viewport(t, .{ .tag = .top, .value = undefined });
+    try testing.expectEqual(Result.success, set(t, .scroll_row_frac, @ptrCast(&set_frac)));
+    try testing.expectEqual(Result.success, get(t, .scroll_row_frac, @ptrCast(&frac)));
+    try testing.expectEqual(@as(f64, 0.25), frac);
+
+    scroll_viewport(t, .{ .tag = .delta, .value = .{ .delta = 1 } });
+    try testing.expectEqual(Result.success, get(t, .scroll_row_frac, @ptrCast(&frac)));
+    try testing.expectEqual(@as(f64, 0), frac);
 }
 
 test "scroll_viewport row alt screen" {

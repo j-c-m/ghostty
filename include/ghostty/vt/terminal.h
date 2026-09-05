@@ -1703,6 +1703,19 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Input type: GhosttyTerminalRenderHoldFn
    */
   GHOSTTY_TERMINAL_OPT_RENDER_HOLD = 41,
+
+  /**
+   * Set the fractional part of the scroll row, 0 <= value < 1.
+   * Combined with the integer scrollbar offset this is the visual
+   * scroll position. 0 is row-aligned.
+   *
+   * A NULL value pointer or a value outside 0 <= value < 1 stores
+   * 0. ghostty_terminal_scroll_viewport resets this to 0. Always
+   * reported as 0 at the bottom.
+   *
+   * Input type: double*
+   */
+  GHOSTTY_TERMINAL_OPT_SCROLL_ROW_FRAC = 42,
   GHOSTTY_TERMINAL_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalOption;
 
@@ -2109,6 +2122,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Output type: size_t *
    */
   GHOSTTY_TERMINAL_DATA_CLIPBOARD_WRITE_MAX_BYTES = 40,
+
+  /**
+   * Fractional part of the scroll row. See
+   * GHOSTTY_TERMINAL_OPT_SCROLL_ROW_FRAC.
+   *
+   * Output type: double *
+   */
+  GHOSTTY_TERMINAL_DATA_SCROLL_ROW_FRAC = 41,
   GHOSTTY_TERMINAL_DATA_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalData;
 

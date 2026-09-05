@@ -44,6 +44,12 @@ alloc: Allocator,
 /// The list of pages in the screen.
 pages: PageList,
 
+/// Fractional part of the scroll row (`0 <= value < 1`). Combined with the
+/// integer viewport pin this is the visual scroll position. `0` is
+/// row-aligned. While the viewport is at the bottom this is ignored
+/// and `scrollRowFrac` returns `0`.
+scroll_row_frac: f64 = 0,
+
 /// Special-case where we want no scrollback whatsoever. We have to flag
 /// this because max_size 0 in PageList gets rounded up to two pages so
 /// we can always have an active screen.
@@ -367,6 +373,7 @@ pub fn assertIntegrity(self: *const Screen) void {
 
         assert(self.cursor.x < self.pages.cols);
         assert(self.cursor.y < self.pages.rows);
+        assert(self.scroll_row_frac >= 0 and self.scroll_row_frac < 1);
 
         // Our cursor x/y should always match the pin. If this doesn't
         // match then it indicates that the tracked pin moved and we didn't
@@ -438,6 +445,7 @@ pub fn reset(self: *Screen) void {
     }
 
     // Reset our basic state
+    self.scroll_row_frac = 0;
     self.saved_cursor = null;
     self.charset = .{};
     self.kitty_keyboard = .{};
@@ -1626,6 +1634,9 @@ pub const Scroll = union(enum) {
 pub inline fn scroll(self: *Screen, behavior: Scroll) void {
     defer self.assertIntegrity();
 
+    // Integer viewport motion is row-aligned.
+    self.scroll_row_frac = 0;
+
     if (comptime build_options.kitty_graphics) {
         // No matter what, scrolling marks our image state as dirty since
         // it could move placements. If there are no placements or no images
@@ -1648,6 +1659,7 @@ pub inline fn scroll(self: *Screen, behavior: Scroll) void {
 pub inline fn scrollClear(self: *Screen) !void {
     defer self.assertIntegrity();
 
+    self.scroll_row_frac = 0;
     try self.pages.scrollClear();
     self.cursorReload();
 
@@ -1662,6 +1674,21 @@ pub inline fn scrollClear(self: *Screen) !void {
 /// Returns true if the viewport is scrolled to the bottom of the screen.
 pub inline fn viewportIsBottom(self: Screen) bool {
     return self.pages.viewport == .active;
+}
+
+/// Fractional part of the scroll row. Always `0` at the bottom.
+pub fn scrollRowFrac(self: Screen) f64 {
+    if (self.viewportIsBottom()) return 0;
+    return self.scroll_row_frac;
+}
+
+/// Set the fractional part of the scroll row. If not `0 <= value < 1`, stores `0`.
+pub fn setScrollRowFrac(self: *Screen, frac: f64) void {
+    defer self.assertIntegrity();
+    self.scroll_row_frac = if (frac > 0 and frac < 1) frac else 0;
+    if (comptime build_options.kitty_graphics) {
+        self.kitty_images.dirty = true;
+    }
 }
 
 /// Erase the region specified by tl and br, inclusive. This will physically
@@ -5549,6 +5576,40 @@ test "Screen: scrolling moves viewport" {
             .y = 1,
         } }, s.pages.pointFromPin(.screen, s.pages.getTopLeft(.viewport)));
     }
+}
+
+test "Screen: scroll row frac" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{
+        .cols = 10,
+        .rows = 3,
+        .max_scrollback_bytes = 10_000,
+    });
+    defer s.deinit();
+    try s.testWriteString("A\nB\nC\nD\nE");
+
+    try testing.expect(s.viewportIsBottom());
+    s.setScrollRowFrac(0.25);
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+
+    s.scroll(.top);
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+    s.setScrollRowFrac(0.25);
+    try testing.expectEqual(@as(f64, 0.25), s.scrollRowFrac());
+
+    s.setScrollRowFrac(0);
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+    s.setScrollRowFrac(1);
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+    s.setScrollRowFrac(-0.1);
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+
+    s.setScrollRowFrac(0.5);
+    s.scroll(.{ .delta_row = 1 });
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
 }
 
 test "Screen: scrolling when viewport is pruned" {

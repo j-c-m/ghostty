@@ -2781,6 +2781,16 @@ pub fn scrollViewport(self: *Terminal, behavior: ScrollViewport) void {
     });
 }
 
+/// Fractional part of the scroll row.
+pub fn scrollRowFrac(self: *const Terminal) f64 {
+    return self.screens.active.scrollRowFrac();
+}
+
+/// Set the fractional part of the scroll row.
+pub fn setScrollRowFrac(self: *Terminal, frac: f64) void {
+    self.screens.active.setScrollRowFrac(frac);
+}
+
 /// Return the current compression activity value.
 ///
 /// Callers should schedule a `compress` call whenever this value changes. The

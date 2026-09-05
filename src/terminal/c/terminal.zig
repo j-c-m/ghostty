@@ -1514,6 +1514,7 @@ pub fn scroll_viewport(
         .top => .top,
         .bottom => .bottom,
         .delta => .{ .delta = behavior.value.delta },
+        .delta_f => .{ .delta_f = behavior.value.delta_f },
         .row => .{ .row = behavior.value.row },
     });
 }
@@ -2426,6 +2427,42 @@ test "scroll row frac get/set" {
     try testing.expectEqual(Result.success, get(t, .scroll_row_frac, @ptrCast(&frac)));
     try testing.expectEqual(@as(f64, 0.25), frac);
 
+    scroll_viewport(t, .{ .tag = .delta, .value = .{ .delta = 1 } });
+    try testing.expectEqual(Result.success, get(t, .scroll_row_frac, @ptrCast(&frac)));
+    try testing.expectEqual(@as(f64, 0), frac);
+}
+
+test "scroll_viewport delta_f" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        10,
+        3,
+    ));
+    defer free(t);
+
+    vt_write(t, "A\r\nB\r\nC\r\nD\r\nE\r\nF\r\nG", 19);
+
+    var scrollbar_data: TerminalScrollbar = undefined;
+    try testing.expectEqual(Result.success, get(t, .scrollbar, @ptrCast(&scrollbar_data)));
+    const max_off = scrollbar_data.offset;
+    try testing.expect(max_off >= 3);
+
+    var frac: f64 = 1;
+    scroll_viewport(t, .{ .tag = .delta_f, .value = .{ .delta_f = -0.25 } });
+    try testing.expectEqual(Result.success, get(t, .scroll_row_frac, @ptrCast(&frac)));
+    try testing.expectEqual(@as(f64, 0.75), frac);
+    try testing.expectEqual(Result.success, get(t, .scrollbar, @ptrCast(&scrollbar_data)));
+    try testing.expectEqual(max_off - 1, scrollbar_data.offset);
+
+    scroll_viewport(t, .{ .tag = .delta_f, .value = .{ .delta_f = 0.25 } });
+    try testing.expectEqual(Result.success, get(t, .scroll_row_frac, @ptrCast(&frac)));
+    try testing.expectEqual(@as(f64, 0), frac);
+    try testing.expectEqual(Result.success, get(t, .scrollbar, @ptrCast(&scrollbar_data)));
+    try testing.expectEqual(max_off, scrollbar_data.offset);
+
+    scroll_viewport(t, .{ .tag = .delta_f, .value = .{ .delta_f = -0.25 } });
     scroll_viewport(t, .{ .tag = .delta, .value = .{ .delta = 1 } });
     try testing.expectEqual(Result.success, get(t, .scroll_row_frac, @ptrCast(&frac)));
     try testing.expectEqual(@as(f64, 0), frac);

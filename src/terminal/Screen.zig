@@ -1627,12 +1627,21 @@ pub const Scroll = union(enum) {
     pin: Pin,
     row: usize,
     delta_row: isize,
+    delta_f: f64,
     delta_prompt: isize,
 };
 
 /// Scroll the viewport of the terminal grid.
 pub inline fn scroll(self: *Screen, behavior: Scroll) void {
     defer self.assertIntegrity();
+
+    switch (behavior) {
+        .delta_f => |delta_rows| {
+            self.scrollDeltaF(delta_rows);
+            return;
+        },
+        else => {},
+    }
 
     // Integer viewport motion is row-aligned.
     self.scroll_row_frac = 0;
@@ -1651,6 +1660,7 @@ pub inline fn scroll(self: *Screen, behavior: Scroll) void {
         .row => |v| self.pages.scroll(.{ .row = v }),
         .delta_row => |v| self.pages.scroll(.{ .delta_row = v }),
         .delta_prompt => |v| self.pages.scroll(.{ .delta_prompt = v }),
+        .delta_f => unreachable,
     }
 }
 
@@ -1689,6 +1699,31 @@ pub fn setScrollRowFrac(self: *Screen, frac: f64) void {
     if (comptime build_options.kitty_graphics) {
         self.kitty_images.dirty = true;
     }
+}
+
+/// Scroll by a (possibly fractional) number of rows. Positive is toward
+/// the bottom, matching `delta_row`. The integer pin and `scroll_row_frac`
+/// are updated together. At the bottom the fraction is always `0`.
+fn scrollDeltaF(self: *Screen, delta_rows: f64) void {
+    if (delta_rows == 0) return;
+
+    const sb = self.pages.scrollbar();
+    const max_off: usize = sb.total -| sb.len;
+    if (max_off == 0) return;
+
+    const cur = @as(f64, @floatFromInt(sb.offset)) + self.scrollRowFrac();
+    const next = std.math.clamp(
+        cur + delta_rows,
+        0,
+        @as(f64, @floatFromInt(max_off)),
+    );
+    const new_off: usize = @intFromFloat(@floor(next));
+    const new_frac = next - @as(f64, @floatFromInt(new_off));
+    const off_delta: isize =
+        @as(isize, @intCast(new_off)) - @as(isize, @intCast(sb.offset));
+
+    if (off_delta != 0) self.scroll(.{ .delta_row = off_delta });
+    self.setScrollRowFrac(if (new_off == max_off) 0 else new_frac);
 }
 
 /// Erase the region specified by tl and br, inclusive. This will physically
@@ -5608,6 +5643,58 @@ test "Screen: scroll row frac" {
     try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
 
     s.setScrollRowFrac(0.5);
+    s.scroll(.{ .delta_row = 1 });
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+}
+
+test "Screen: scroll delta_f" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{
+        .cols = 10,
+        .rows = 3,
+        .max_scrollback_bytes = 10_000,
+    });
+    defer s.deinit();
+    try s.testWriteString("A\nB\nC\nD\nE\nF\nG");
+
+    try testing.expect(s.viewportIsBottom());
+    const max_off = s.pages.scrollbar().offset;
+    try testing.expect(max_off >= 3);
+
+    s.scroll(.{ .delta_f = 0 });
+    try testing.expect(s.viewportIsBottom());
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+
+    s.scroll(.{ .delta_f = 1 });
+    try testing.expect(s.viewportIsBottom());
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+
+    s.scroll(.{ .delta_f = -0.25 });
+    try testing.expect(!s.viewportIsBottom());
+    try testing.expectEqual(max_off - 1, s.pages.scrollbar().offset);
+    try testing.expectEqual(@as(f64, 0.75), s.scrollRowFrac());
+
+    s.scroll(.{ .delta_f = 0.25 });
+    try testing.expect(s.viewportIsBottom());
+    try testing.expectEqual(max_off, s.pages.scrollbar().offset);
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+
+    s.scroll(.{ .delta_f = -2.25 });
+    try testing.expectEqual(max_off - 3, s.pages.scrollbar().offset);
+    try testing.expectEqual(@as(f64, 0.75), s.scrollRowFrac());
+
+    s.scroll(.{ .delta_f = -10_000 });
+    try testing.expectEqual(@as(usize, 0), s.pages.scrollbar().offset);
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+
+    s.scroll(.{ .delta_f = 10_000 });
+    try testing.expect(s.viewportIsBottom());
+    try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
+
+    s.scroll(.{ .delta_f = -0.25 });
     s.scroll(.{ .delta_row = 1 });
     try testing.expectEqual(@as(f64, 0), s.scrollRowFrac());
 }

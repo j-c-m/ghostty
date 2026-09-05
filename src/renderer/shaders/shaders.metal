@@ -13,6 +13,7 @@ struct Uniforms {
   float4x4 projection_matrix;
   float2 screen_size;
   float2 cell_size;
+  float2 content_offset;
   ushort2 grid_size;
   float4 grid_padding;
   uint8_t padding_extend;
@@ -485,7 +486,7 @@ vertex CellBgVertexOut cell_bg_vertex(
   corner.x = float(vid == 1 || vid == 3);
   corner.y = float(vid == 2 || vid == 3);
 
-  float2 origin = uniforms.cell_size * float2(x, y);
+  float2 origin = uniforms.cell_size * float2(x, y) + uniforms.content_offset;
   float2 size = uniforms.cell_size;
 
   // Extend edge cells into window padding when padding_extend is set.
@@ -578,7 +579,7 @@ vertex CellTextVertexOut cell_text_vertex(
   constant uchar4 *bg_colors [[buffer(2)]]
 ) {
   // Convert the grid x, y into world space x, y by accounting for cell size
-  float2 cell_pos = uniforms.cell_size * float2(in.grid_pos);
+  float2 cell_pos = uniforms.cell_size * float2(in.grid_pos) + uniforms.content_offset;
 
   // We use a triangle strip with 4 vertices to render quads,
   // so we determine which corner of the cell this vertex is in
@@ -838,7 +839,7 @@ vertex ImageVertexOut image_vertex(
 
   // The position of our image starts at the top-left of the grid cell and
   // adds the source rect width/height components.
-  float2 image_pos = (uniforms.cell_size * in.grid_pos) + in.cell_offset;
+  float2 image_pos = (uniforms.cell_size * in.grid_pos) + in.cell_offset + uniforms.content_offset;
   image_pos += in.dest_size * corner;
 
   out.position =

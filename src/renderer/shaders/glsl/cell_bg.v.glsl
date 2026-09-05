@@ -36,7 +36,7 @@ void main() {
     corner.x = float(vid == 1 || vid == 3);
     corner.y = float(vid == 2 || vid == 3);
 
-    vec2 origin = cell_size * vec2(x, y);
+    vec2 origin = cell_size * vec2(x, y) + content_offset;
     vec2 size = cell_size;
 
     // Extend edge cells into window padding when padding_extend is set.

@@ -41,6 +41,9 @@ final class ScriptMouseScrollCommand: NSScriptCommand {
             return nil
         }
 
+        // x/y are caller units (typically points). Host scrollWheel
+        // converts precise deltas to backing pixels; scripted events
+        // are not rescaled.
         let precision = evaluatedArguments?["precision"] as? Bool ?? false
 
         let momentum: Ghostty.Input.Momentum

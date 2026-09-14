@@ -32,6 +32,7 @@ const Command = @import("Command.zig");
 const terminal = @import("terminal/main.zig");
 const configpkg = @import("config.zig");
 const Duration = configpkg.Config.Duration;
+const build_config = @import("build_config.zig");
 const input = @import("input.zig");
 const App = @import("App.zig");
 const internal_os = @import("os/main.zig");
@@ -1198,12 +1199,12 @@ fn selectionScrollTick(self: *Surface) !void {
     }
 
     const pos = try self.rt_surface.getCursorPos();
-    const pos_vp = self.posToViewport(pos.x, pos.y);
 
     // We need our locked state for the remainder
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
     const t: *terminal.Terminal = self.renderer_state.terminal;
+    const pos_vp = self.posToViewport(pos.x, pos.y);
 
     const selection = self.mouse.selection_gesture.autoscrollTick(t, .{
         .viewport = pos_vp,
@@ -3498,60 +3499,54 @@ pub fn scrollCallback(
     // Always show the mouse again if it is hidden
     if (self.mouse.hidden) self.showMouse();
 
-    const y: ScrollAmount = if (yoff == 0) .{} else y: {
-        // We use cell_size to determine if we have accumulated enough to trigger a scroll
-        const cell_size: f64 = @floatFromInt(self.size.cell.height);
+    // We use cell_size to determine if we have accumulated enough to trigger a scroll
+    const cell_size: f64 = @floatFromInt(self.size.cell.height);
 
-        // If we have precision scroll, yoff is the number of pixels to scroll. In non-precision
-        // scroll, yoff is the number of wheel ticks. Some mice are capable of reporting fractional
-        // wheel ticks, which don't necessarily get reported as precision scrolls. We normalize all
-        // scroll events to pixels by multiplying the wheel tick value and the cell size. This means
-        // that a wheel tick of 1 results in single scroll event.
-        const yoff_adjusted: f64 = if (scroll_mods.precision)
-            yoff * self.config.mouse_scroll_multiplier.precision
-        else yoff_adjusted: {
-            if (comptime builtin.target.os.tag.isDarwin()) {
-                // Round out the yoff to an absolute minimum of 1. macos tries to
-                // simulate precision scrolling with non precision events by
-                // ramping up the magnitude of the offsets as it detects faster
-                // scrolling. Single click (very slow) scrolls are reported with a
-                // magnitude of 0.1 which would normally require a few clicks
-                // before we register an actual scroll event (depending on cell
-                // height and the mouse_scroll_multiplier setting).
-                const yoff_max: f64 = if (yoff > 0)
-                    @max(yoff, 1)
-                else
-                    @min(yoff, -1);
+    // If we have precision scroll, yoff is the number of pixels to scroll. In non-precision
+    // scroll, yoff is the number of wheel ticks. Some mice are capable of reporting fractional
+    // wheel ticks, which don't necessarily get reported as precision scrolls. We normalize all
+    // scroll events to pixels by multiplying the wheel tick value and the cell size. This means
+    // that a wheel tick of 1 results in single scroll event.
+    const yoff_adjusted: f64 = if (yoff == 0) 0 else if (scroll_mods.precision)
+        yoff * self.config.mouse_scroll_multiplier.precision
+    else yoff_adjusted: {
+        if (comptime builtin.target.os.tag.isDarwin()) {
+            // Round out the yoff to an absolute minimum of 1. macos tries to
+            // simulate precision scrolling with non precision events by
+            // ramping up the magnitude of the offsets as it detects faster
+            // scrolling. Single click (very slow) scrolls are reported with a
+            // magnitude of 0.1 which would normally require a few clicks
+            // before we register an actual scroll event (depending on cell
+            // height and the mouse_scroll_multiplier setting).
+            const yoff_max: f64 = if (yoff > 0)
+                @max(yoff, 1)
+            else
+                @min(yoff, -1);
 
-                break :yoff_adjusted yoff_max * cell_size * self.config.mouse_scroll_multiplier.discrete;
-            } else {
-                break :yoff_adjusted yoff * cell_size * self.config.mouse_scroll_multiplier.discrete;
-            }
-        };
-
-        // Add our previously saved pending amount to the offset to get the
-        // new offset value. The signs of the pending and yoff should match
-        // so that we move further away from zero, but we don't assert
-        // this because in theory a user could scroll in the opposite
-        // direction and undo a pending scroll.
-        const poff: f64 = self.mouse.pending_scroll_y + yoff_adjusted;
-
-        // If the new offset is less than a single unit of scroll, we save
-        // the new pending value and do not scroll yet.
-        if (@abs(poff) < cell_size) {
-            self.mouse.pending_scroll_y = poff;
-            break :y .{};
+            break :yoff_adjusted yoff_max * cell_size * self.config.mouse_scroll_multiplier.discrete;
+        } else {
+            break :yoff_adjusted yoff * cell_size * self.config.mouse_scroll_multiplier.discrete;
         }
+    };
 
-        // We scroll by the number of rows in the offset and save the remainder
+    // Integer-row consumers (mouse report, alt-scroll, discrete viewport)
+    // keep historical GTK touchpad feel. Precision viewport uses
+    // yoff_adjusted as framebuffer pixels (no * 10).
+    const yoff_integer: f64 = if (comptime build_config.app_runtime == .gtk)
+        if (scroll_mods.precision) yoff_adjusted * 10.0 else yoff_adjusted
+    else
+        yoff_adjusted;
+
+    // Integer row delta. Pending is applied only on integer paths so a
+    // precision viewport pan can ignore and clear leftover pending.
+    const poff: f64 = self.mouse.pending_scroll_y + yoff_integer;
+    const y: ScrollAmount = y: {
+        if (yoff == 0) break :y .{};
+        if (@abs(poff) < cell_size) break :y .{};
         const amount = poff / cell_size;
         assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_y = poff - (amount * cell_size);
-
-        // Round towards zero.
         const delta: isize = @intFromFloat(@trunc(amount));
         assert(@abs(delta) >= 1);
-
         break :y .{ .delta = delta };
     };
 
@@ -3562,16 +3557,16 @@ pub fn scrollCallback(
             break :x .{ .delta = x_delta_isize };
         }
 
-        const poff: f64 = self.mouse.pending_scroll_x + xoff;
-        const cell_size: f64 = @floatFromInt(self.size.cell.width);
-        if (@abs(poff) < cell_size) {
-            self.mouse.pending_scroll_x = poff;
+        const x_poff: f64 = self.mouse.pending_scroll_x + xoff;
+        const cell_width: f64 = @floatFromInt(self.size.cell.width);
+        if (@abs(x_poff) < cell_width) {
+            self.mouse.pending_scroll_x = x_poff;
             break :x .{};
         }
 
-        const amount = poff / cell_size;
+        const amount = x_poff / cell_width;
         assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_x = poff - (amount * cell_size);
+        self.mouse.pending_scroll_x = x_poff - (amount * cell_width);
         const delta: isize = @intFromFloat(@trunc(amount));
         assert(@abs(delta) >= 1);
         break :x .{ .delta = delta };
@@ -3590,14 +3585,25 @@ pub fn scrollCallback(
             try self.setSelection(null);
         }
 
+        const alt_scroll = self.io.terminal.screens.active_key == .alternate and
+            self.io.terminal.flags.mouse_event == .none and
+            self.io.terminal.modes.get(.mouse_alternate_scroll);
+        const reporting = self.isMouseReporting();
+        const integer_y = alt_scroll or reporting or !scroll_mods.precision;
+        if (integer_y and yoff != 0) {
+            if (@abs(poff) < cell_size) {
+                self.mouse.pending_scroll_y = poff;
+            } else {
+                const amount = poff / cell_size;
+                self.mouse.pending_scroll_y = poff - (amount * cell_size);
+            }
+        }
+
         // If we're in alternate screen with alternate scroll enabled, then
         // we convert to cursor keys. This only happens if we're:
         // (1) alt screen (2) no explicit mouse reporting and (3) alt
         // scroll mode enabled.
-        if (self.io.terminal.screens.active_key == .alternate and
-            self.io.terminal.flags.mouse_event == .none and
-            self.io.terminal.modes.get(.mouse_alternate_scroll))
-        {
+        if (alt_scroll) {
             if (y.delta != 0) {
                 // When we send mouse events as cursor keys we always
                 // clear the selection.
@@ -3629,7 +3635,7 @@ pub fn scrollCallback(
         // the normal logic.
 
         // If we're scrolling up or down, then send a mouse event.
-        if (self.isMouseReporting()) {
+        if (reporting) {
             for (0..@abs(y.delta)) |_| {
                 const pos = try self.rt_surface.getCursorPos();
                 self.mouseReport(switch (y.direction()) {
@@ -3651,7 +3657,19 @@ pub fn scrollCallback(
             return;
         }
 
-        if (y.delta != 0) {
+        if (scroll_mods.precision) {
+            // Precision viewport consumes the full pixel remainder as a
+            // fractional row delta. Sign flip: Surface y is negative down,
+            // viewport is positive down. Skip x-only events so a leftover
+            // Y pending is not flushed. Ignore and clear pending rather
+            // than folding report/alt-scroll remainder into delta_f.
+            if (yoff != 0) {
+                self.mouse.pending_scroll_y = 0;
+                self.io.terminal.scrollViewport(.{
+                    .delta_f = -(yoff_adjusted / cell_size),
+                });
+            }
+        } else if (y.delta != 0) {
             // Modify our viewport, this requires a lock since it affects
             // rendering. We have to switch signs here because our delta
             // is negative down but our viewport is positive down.
@@ -4607,9 +4625,6 @@ pub fn cursorPosCallback(
     // Update our modifiers if they changed
     if (mods) |v| self.modsChanged(v);
 
-    // The mouse position in the viewport
-    const pos_vp = self.posToViewport(pos.x, pos.y);
-
     // We always reset the over link status because it will be reprocessed
     // below. But we need the old value to know if we need to undo mouse
     // shape changes.
@@ -4619,6 +4634,9 @@ pub fn cursorPosCallback(
     // We are reading/writing state for the remainder
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
+
+    // The mouse position in the viewport. Frac is terminal state.
+    const pos_vp = self.posToViewport(pos.x, pos.y);
 
     // Update our mouse state. We set this to null initially because we only
     // want to set it when we're not selecting or doing any other mouse
@@ -4773,10 +4791,15 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
     self.queueIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
 }
 
+/// Surface-space pixels to a viewport cell, shifted by the painted
+/// `scroll_row_frac`. Callers must hold `renderer_state.mutex`.
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
-    // Get our grid cell
-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
-    const grid = coord.convert(.grid, self.size).grid;
+    const grid = rendererpkg.surfaceToGrid(
+        self.size,
+        xpos,
+        ypos,
+        self.io.terminal.scrollRowFrac(),
+    );
     return .{ .x = grid.x, .y = grid.y };
 }
 

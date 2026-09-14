@@ -26,6 +26,7 @@ pub const CursorStyle = cursor.Style;
 pub const Message = message.Message;
 pub const Size = size.Size;
 pub const Coordinate = size.Coordinate;
+pub const surfaceToGrid = size.surfaceToGrid;
 pub const CellSize = size.CellSize;
 pub const ScreenSize = size.ScreenSize;
 pub const GridSize = size.GridSize;

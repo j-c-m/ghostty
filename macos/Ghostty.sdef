@@ -272,10 +272,10 @@
 
     <command name="send mouse scroll" code="GhstSMSc" description="Send a mouse scroll event to a terminal.">
       <cocoa class="GhosttyScriptMouseScrollCommand"/>
-      <parameter name="x" code="GMsX" type="real" description="Horizontal scroll delta.">
+      <parameter name="x" code="GMsX" type="real" description="Horizontal scroll delta in caller units (typically points). Scripted events are not converted to backing pixels.">
         <cocoa key="x"/>
       </parameter>
-      <parameter name="y" code="GMsY" type="real" description="Vertical scroll delta.">
+      <parameter name="y" code="GMsY" type="real" description="Vertical scroll delta in caller units (typically points). Scripted events are not converted to backing pixels.">
         <cocoa key="y"/>
       </parameter>
       <parameter name="precision" code="GMsP" type="boolean" optional="yes" description="High-precision scroll (e.g. trackpad). Default: false.">

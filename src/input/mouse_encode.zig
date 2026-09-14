@@ -36,6 +36,10 @@ pub const Options = struct {
     /// If null, motion deduplication state is not tracked.
     last_cell: ?*?point.Coordinate = null,
 
+    /// Painted scroll_row_frac. Cell reports clamp to the last TUI row;
+    /// SGR-Pixels uses logical y (see posToPixels).
+    scroll_row_frac: f64 = 0,
+
     /// Initialize from terminal and renderer state. The caller may still
     /// set any_button_pressed and last_cell on the returned value.
     pub fn fromTerminal(
@@ -46,6 +50,7 @@ pub const Options = struct {
             .event = t.flags.mouse_event,
             .format = t.flags.mouse_format,
             .size = size,
+            .scroll_row_frac = t.scrollRowFrac(),
         };
     }
 };
@@ -101,7 +106,7 @@ pub fn encode(
         if (!opts.any_button_pressed) return;
     }
 
-    const cell = posToCell(event.pos, opts.size);
+    const cell = posToCell(event.pos, opts.size, opts.scroll_row_frac);
 
     // We only send motion events when the cell changed unless
     // we're tracking raw pixels.
@@ -162,7 +167,7 @@ pub fn encode(
         }),
 
         .sgr_pixels => {
-            const pixels = posToPixels(event.pos, opts.size);
+            const pixels = posToPixels(event.pos, opts.size, opts.scroll_row_frac);
             try writer.print("\x1B[<{d};{d};{d}{c}", .{
                 button_code,
                 pixels.x,
@@ -256,28 +261,51 @@ fn posOutOfViewport(pos: Event.Pos, size: renderer_size.Size) bool {
 /// Converts a surface-space pixel position to a zero-based grid cell
 /// coordinate (column, row) within the terminal viewport. Out-of-bounds
 /// values are clamped to the valid grid range (0 to columns/rows - 1).
-fn posToCell(pos: Event.Pos, size: renderer_size.Size) point.Coordinate {
-    const coord: renderer_size.Coordinate = .{ .surface = .{
-        .x = @as(f64, @floatCast(pos.x)),
-        .y = @as(f64, @floatCast(pos.y)),
-    } };
-    const grid = coord.convert(.grid, size).grid;
-    return .{ .x = grid.x, .y = grid.y };
+/// Extra-row hits from leftover frac clamp to the last TUI row.
+fn posToCell(
+    pos: Event.Pos,
+    size: renderer_size.Size,
+    scroll_row_frac: f64,
+) point.Coordinate {
+    const grid = renderer_size.surfaceToGrid(
+        size,
+        @as(f64, @floatCast(pos.x)),
+        @as(f64, @floatCast(pos.y)),
+        scroll_row_frac,
+    );
+    const max_row = size.grid().rows - 1;
+    return .{ .x = grid.x, .y = @min(grid.y, max_row) };
 }
 
 /// Converts a surface-space pixel position to terminal-space pixel
 /// coordinates (accounting for padding/scaling) used by SGR-Pixels mode.
 /// Unlike grid conversion, terminal-space coordinates are not clamped
-/// and may be negative or exceed the terminal dimensions.
-fn posToPixels(pos: Event.Pos, size: renderer_size.Size) PixelPoint {
+/// and may be negative or exceed the terminal dimensions when frac is 0.
+/// When frac != 0, in-rect extra-row overflow is capped at the last
+/// terminal pixel so the TUI does not see a row below its grid.
+fn posToPixels(
+    pos: Event.Pos,
+    size: renderer_size.Size,
+    scroll_row_frac: f64,
+) PixelPoint {
     const coord: renderer_size.Coordinate.Terminal = (renderer_size.Coordinate{ .surface = .{
         .x = @as(f64, @floatCast(pos.x)),
         .y = @as(f64, @floatCast(pos.y)),
     } }).convert(.terminal, size).terminal;
 
+    const cell_h: f64 = @floatFromInt(size.cell.height);
+    var logical_y = coord.y + scroll_row_frac * cell_h;
+    if (scroll_row_frac != 0) {
+        const term_h: f64 = @as(f64, @floatFromInt(size.grid().rows)) * cell_h;
+        const in_rect = coord.y >= 0 and coord.y < term_h;
+        if (in_rect and logical_y >= term_h) {
+            logical_y = term_h - 1;
+        }
+    }
+
     return .{
         .x = @as(i32, @intFromFloat(@round(coord.x))),
-        .y = @as(i32, @intFromFloat(@round(coord.y))),
+        .y = @as(i32, @intFromFloat(@round(logical_y))),
     };
 }
 
@@ -778,4 +806,74 @@ test "motion is deduped by last cell except sgr pixels" {
         });
         try testing.expect(writer.buffered().len > 0);
     }
+}
+
+fn fracTestSize() renderer_size.Size {
+    return .{
+        .screen = .{ .width = 60, .height = 60 },
+        .cell = .{ .width = 20, .height = 20 },
+        .padding = .{},
+    };
+}
+
+test "posToCell extra-row strip clamps to last TUI row" {
+    const size = fracTestSize();
+    // Visual y 55 with frac 0.25 is the extra-row strip (logical row 3).
+    const cell = posToCell(.{ .x = 0, .y = 55 }, size, 0.25);
+    try testing.expectEqual(point.Coordinate{ .x = 0, .y = 2 }, cell);
+
+    var data: [32]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&data);
+    try encode(&writer, .{
+        .button = .left,
+        .action = .press,
+        .pos = .{ .x = 0, .y = 55 },
+    }, .{
+        .event = .any,
+        .format = .sgr,
+        .size = size,
+        .scroll_row_frac = 0.25,
+    });
+    try testing.expectEqualStrings("\x1B[<0;1;3M", writer.buffered());
+}
+
+test "posToPixels extra-row strip caps in-rect overflow" {
+    const size = fracTestSize();
+    const pixels = posToPixels(.{ .x = 0, .y = 55 }, size, 0.25);
+    try testing.expectEqual(@as(i32, 59), pixels.y);
+
+    var data: [32]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&data);
+    try encode(&writer, .{
+        .button = .left,
+        .action = .press,
+        .pos = .{ .x = 0, .y = 55 },
+    }, .{
+        .event = .any,
+        .format = .sgr_pixels,
+        .size = size,
+        .scroll_row_frac = 0.25,
+    });
+    try testing.expectEqualStrings("\x1B[<0;0;59M", writer.buffered());
+}
+
+test "posToPixels frac 0 negative y stays unclamped" {
+    const size = fracTestSize();
+    const pixels = posToPixels(.{ .x = 0, .y = -1 }, size, 0);
+    try testing.expectEqual(@as(i32, -1), pixels.y);
+
+    var data: [32]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&data);
+    try encode(&writer, .{
+        .button = .left,
+        .action = .press,
+        .pos = .{ .x = 0, .y = -1 },
+    }, .{
+        .event = .any,
+        .format = .sgr_pixels,
+        .size = size,
+        .any_button_pressed = true,
+        .scroll_row_frac = 0,
+    });
+    try testing.expectEqualStrings("\x1B[<0;0;-1M", writer.buffered());
 }

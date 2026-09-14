@@ -174,6 +174,28 @@ pub const Coordinate = union(enum) {
     }
 };
 
+/// Surface-space pixel → viewport cell, shifted by the painted scroll_row_frac.
+/// `frac` is Screen.scrollRowFrac() (0 at the bottom).
+pub fn surfaceToGrid(
+    size: Size,
+    xpos: f64,
+    ypos: f64,
+    scroll_row_frac: f64,
+) Coordinate.Grid {
+    const term = (Coordinate{ .surface = .{ .x = xpos, .y = ypos } })
+        .convert(.terminal, size).terminal;
+    const cell_w: f64 = @floatFromInt(size.cell.width);
+    const cell_h: f64 = @floatFromInt(size.cell.height);
+    const grid = size.grid();
+    const col: GridSize.Unit = @intFromFloat(@max(0, term.x) / cell_w);
+    const row: GridSize.Unit = @intFromFloat(@max(0, term.y + scroll_row_frac * cell_h) / cell_h);
+    const max_row: GridSize.Unit = if (scroll_row_frac == 0) grid.rows - 1 else grid.rows;
+    return .{
+        .x = @min(col, grid.columns - 1),
+        .y = @min(row, max_row),
+    };
+}
+
 /// The dimensions of a single "cell" in the terminal grid.
 ///
 /// The dimensions are dependent on the current loaded set of font glyphs.
@@ -455,4 +477,87 @@ test "coordinate conversion" {
         const actual = pair[1].convert(@as(Coordinate.Tag, expected), test_size);
         try testing.expectEqual(expected, actual);
     }
+}
+
+test "surfaceToGrid" {
+    const testing = std.testing;
+
+    const size: Size = .{
+        .screen = .{ .width = 60, .height = 60 },
+        .cell = .{ .width = 20, .height = 20 },
+        .padding = .{},
+    };
+    try testing.expectEqual(@as(GridSize.Unit, 3), size.grid().rows);
+
+    // Worked example: rows=3, cell_h=20, frac=0.25.
+    try testing.expectEqual(
+        Coordinate.Grid{ .x = 0, .y = 0 },
+        surfaceToGrid(size, 0, 0, 0.25),
+    );
+    try testing.expectEqual(
+        Coordinate.Grid{ .x = 0, .y = 1 },
+        surfaceToGrid(size, 0, 15, 0.25),
+    );
+    try testing.expectEqual(
+        Coordinate.Grid{ .x = 0, .y = 3 },
+        surfaceToGrid(size, 0, 55, 0.25),
+    );
+
+    // frac == 0 matches Coordinate.convert(.grid).
+    const frac0_size: Size = .{
+        .screen = .{ .width = 100, .height = 100 },
+        .cell = .{ .width = 5, .height = 10 },
+        .padding = .{},
+    };
+    const frac0_points = [_][2]f64{
+        .{ 0, 0 },
+        .{ 6, 0 },
+        .{ 6, 10 },
+        .{ -10, -10 },
+        .{ 100_000, 100_000 },
+    };
+    for (frac0_points) |p| {
+        const via_convert = (Coordinate{ .surface = .{ .x = p[0], .y = p[1] } })
+            .convert(.grid, frac0_size).grid;
+        const via_helper = surfaceToGrid(frac0_size, p[0], p[1], 0);
+        try testing.expectEqual(via_convert, via_helper);
+    }
+
+    // Extra-row strip: visual y in [rows * cell_h - frac * cell_h, rows * cell_h).
+    try testing.expectEqual(
+        @as(GridSize.Unit, 3),
+        surfaceToGrid(size, 0, 55, 0.25).y,
+    );
+    try testing.expectEqual(
+        @as(GridSize.Unit, 3),
+        surfaceToGrid(size, 0, 59, 0.25).y,
+    );
+
+    // Negative / past-end clamping.
+    try testing.expectEqual(
+        Coordinate.Grid{ .x = 0, .y = 0 },
+        surfaceToGrid(size, -10, -10, 0.25),
+    );
+    try testing.expectEqual(
+        @as(GridSize.Unit, size.grid().columns - 1),
+        surfaceToGrid(size, 100_000, 0, 0).x,
+    );
+
+    // Non-zero padding.top: terminal space is surface.y - padding.top.
+    const padded: Size = .{
+        .screen = .{ .width = 60, .height = 70 },
+        .cell = .{ .width = 20, .height = 20 },
+        .padding = .{ .top = 10 },
+    };
+    try testing.expectEqual(@as(GridSize.Unit, 3), padded.grid().rows);
+    try testing.expectEqual(
+        Coordinate.Grid{ .x = 0, .y = 0 },
+        surfaceToGrid(padded, 0, 5, 0.25),
+    );
+
+    // Bottom padding with leftover frac hits the extra row.
+    try testing.expectEqual(
+        @as(GridSize.Unit, 3),
+        surfaceToGrid(size, 0, 70, 0.25).y,
+    );
 }

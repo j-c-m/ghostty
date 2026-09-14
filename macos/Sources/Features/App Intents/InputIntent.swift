@@ -241,14 +241,14 @@ struct MouseScrollIntent: AppIntent {
 
     @Parameter(
         title: "X Scroll Delta",
-        description: "The horizontal scroll amount.",
+        description: "Horizontal scroll amount in caller units (typically points). Not converted to backing pixels.",
         default: 0
     )
     var x: Double
 
     @Parameter(
         title: "Y Scroll Delta",
-        description: "The vertical scroll amount.",
+        description: "Vertical scroll amount in caller units (typically points). Not converted to backing pixels.",
         default: 0
     )
     var y: Double

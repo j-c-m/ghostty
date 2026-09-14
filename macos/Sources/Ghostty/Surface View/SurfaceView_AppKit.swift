@@ -1063,11 +1063,12 @@ extension Ghostty {
             let precision = event.hasPreciseScrollingDeltas
 
             if precision {
-                // We do a 2x speed multiplier. This is subjective, it "feels" better to me.
-                x *= 2
-                y *= 2
-
-                // TODO(mitchellh): do we have to scale the x/y here by window scale factor?
+                // Precise scrollingDelta is in points. Surface size and
+                // cell.height are backing pixels. Convert the delta as a
+                // vector so x/y scales apply independently.
+                let scaled = convertToBacking(NSSize(width: x, height: y))
+                x = scaled.width
+                y = scaled.height
             }
 
             let scrollEvent = Ghostty.Input.MouseScrollEvent(

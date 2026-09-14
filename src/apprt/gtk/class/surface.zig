@@ -3051,7 +3051,7 @@ pub const Surface = extern struct {
     }
 
     fn ecMouseScrollVertical(
-        _: *gtk.EventControllerScroll,
+        ec: *gtk.EventControllerScroll,
         x: f64,
         y: f64,
         self: *Self,
@@ -3059,11 +3059,15 @@ pub const Surface = extern struct {
         const priv: *Private = self.private();
         const surface = priv.core_surface orelse return 0;
 
-        // Multiply precision scrolls by 10 to get a better response from
-        // touchpad scrolling
-        const multiplier: f64 = if (priv.precision_scroll) 10.0 else 1.0;
+        // Pixel-unit devices that never fire begin/end still take the
+        // precision path. GTK * 10 for TUI report/alt-scroll is applied
+        // in Surface.scrollCallback, not here, so viewport delta_f stays 1:1.
+        // scaledCoordinates is CSS-px → framebuffer-px (GDK scale_factor),
+        // matching cell.height. Keep it for .surface unless a HiDPI session
+        // shows those units are already device pixels.
+        const precision = priv.precision_scroll or (ec.getUnit() == .surface);
         const scroll_mods: input.ScrollMods = .{
-            .precision = priv.precision_scroll,
+            .precision = precision,
         };
 
         const scaled = self.scaledCoordinates(x, y);
@@ -3072,8 +3076,8 @@ pub const Surface = extern struct {
             // This behavior has existed for years without Linux users complaining
             // but I suspect we'll have to make this configurable in the future
             // or read a system setting.
-            scaled.x * -1 * multiplier,
-            scaled.y * -1 * multiplier,
+            scaled.x * -1,
+            scaled.y * -1,
             scroll_mods,
         ) catch |err| {
             log.warn("error in scroll callback err={}", .{err});

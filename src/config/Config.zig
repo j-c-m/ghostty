@@ -997,6 +997,10 @@ palette: Palette = .{},
 /// and you're likely to have a bad experience if you set either extreme.
 ///
 /// The default value is "3" for discrete devices and "1" for precision devices.
+/// `precision:1` is native 1:1 in framebuffer pixels for precise instruments
+/// (trackpads, Magic Mouse, pixel-reporting wheels). Values other than 1
+/// intentionally change that mapping. Discrete devices still scroll in
+/// whole rows.
 @"mouse-scroll-multiplier": MouseScrollMultiplier = .default,
 
 /// The opacity level (opposite of transparency) of the background. A value of

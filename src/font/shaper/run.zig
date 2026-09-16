@@ -4,8 +4,6 @@ const Allocator = std.mem.Allocator;
 const font = @import("../main.zig");
 const shape = @import("../shape.zig");
 const terminal = @import("../../terminal/main.zig");
-const autoHash = std.hash.autoHash;
-const Hasher = std.hash.Wyhash;
 
 /// A single text run. A text run is only valid for one Shaper instance and
 /// until the next run is created. A text run never goes across multiple
@@ -75,8 +73,10 @@ pub const RunIterator = struct {
         // Allow the hook to prepare
         self.hooks.prepare();
 
-        // Initialize our hash for this run.
-        var hasher = Hasher.init(0);
+        // Running cache key for this run. Mixed per codepoint rather
+        // than Wyhash so the renderer hot path stays in a few arithmetic
+        // ops per cell.
+        var hash: u64 = 0;
 
         // Let's get our style that we'll expect for the run.
         const style: terminal.Style = if (cells[self.i].hasStyling()) styles[self.i] else .{};
@@ -257,19 +257,19 @@ pub const RunIterator = struct {
             // If we're a fallback character, add that and continue; we
             // don't want to add the entire grapheme.
             if (font_info.fallback) |cp| {
-                try self.addCodepoint(&hasher, cp, @intCast(cluster));
+                try self.addCodepoint(&hash, cp, @intCast(cluster));
                 continue;
             }
 
             // If we're a Kitty unicode placeholder then we add a blank.
             if (cell.codepoint() == terminal.kitty.graphics.unicode.placeholder) {
-                try self.addCodepoint(&hasher, ' ', @intCast(cluster));
+                try self.addCodepoint(&hash, ' ', @intCast(cluster));
                 continue;
             }
 
             // Add all the codepoints for our grapheme
             try self.addCodepoint(
-                &hasher,
+                &hash,
                 if (cell.codepoint() == 0) ' ' else cell.codepoint(),
                 @intCast(cluster),
             );
@@ -277,7 +277,7 @@ pub const RunIterator = struct {
                 for (graphemes[j]) |cp| {
                     // Do not send presentation modifiers
                     if (cp == 0xFE0E or cp == 0xFE0F) continue;
-                    try self.addCodepoint(&hasher, cp, @intCast(cluster));
+                    try self.addCodepoint(&hash, cp, @intCast(cluster));
                 }
             }
         }
@@ -285,17 +285,16 @@ pub const RunIterator = struct {
         // Finalize our buffer
         self.hooks.finalize();
 
-        // Add our length to the hash as an additional mechanism to avoid collisions
-        autoHash(&hasher, j - self.i);
-
-        // Add our font index
-        autoHash(&hasher, current_font);
+        // Fold in cell span and font so runs that share codepoints but
+        // not length or face do not collide.
+        hash = mix(hash, @as(u64, @intCast(j - self.i)));
+        hash = mix(hash, current_font.int());
 
         // Move our cursor. Must defer since we use self.i below.
         defer self.i = j;
 
         return .{
-            .hash = hasher.final(),
+            .hash = hash,
             .offset = @intCast(self.i),
             .cells = @intCast(j - self.i),
             .grid = self.opts.grid,
@@ -303,9 +302,19 @@ pub const RunIterator = struct {
         };
     }
 
-    fn addCodepoint(self: *RunIterator, hasher: anytype, cp: u32, cluster: u32) !void {
-        autoHash(hasher, cp);
-        autoHash(hasher, cluster);
+    /// Mix a word into the run cache key. Same mixer as
+    /// `std.Random.SplitMix64.next` (without the Weyl increment).
+    /// Collisions can produce wrong glyphs for a cached run, so this
+    /// still avalanches; it just avoids Wyhash on every cell.
+    inline fn mix(h: u64, x: u64) u64 {
+        var z = h ^ x;
+        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+        return z ^ (z >> 31);
+    }
+
+    inline fn addCodepoint(self: *RunIterator, hash: *u64, cp: u32, cluster: u32) !void {
+        hash.* = mix(hash.*, (@as(u64, cp) << 32) | cluster);
         try self.hooks.addCodepoint(cp, cluster);
     }
 

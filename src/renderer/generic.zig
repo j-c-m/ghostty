@@ -201,6 +201,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// on the common path. 512-slot direct map, 20480 bytes (~20 KiB).
         glyph_cache: font.SharedGrid.GlyphCache = @splat(.{}),
 
+        /// Per-renderer getIndex cache so shaping does not take
+        /// SharedGrid.lock on the common path. 512-slot direct map,
+        /// 8192 bytes (~8 KiB).
+        index_cache: font.SharedGrid.IndexCache = @splat(.{}),
+
         /// The images that we may render.
         images: ImageState = .empty,
 
@@ -1293,6 +1298,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.font_shaper_cache.deinit(self.alloc);
             self.font_shaper_cache = font_shaper_cache;
             self.glyph_cache = @splat(.{});
+            self.index_cache = @splat(.{});
 
             // Update cell size.
             self.size.cell = .{
@@ -2159,6 +2165,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.font_shaper_cache.deinit(self.alloc);
             self.font_shaper_cache = font_shaper_cache;
             self.glyph_cache = @splat(.{});
+            self.index_cache = @splat(.{});
 
             // Set our new minimum contrast
             self.uniforms.min_contrast = config.min_contrast;
@@ -2958,6 +2965,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Iterator of runs for shaping.
             var run_iter_opts: font.shape.RunOptions = .{
                 .grid = self.font_grid,
+                .index_cache = &self.index_cache,
                 .cells = cells_slice,
                 .selection = if (selection) |s| s else null,
 

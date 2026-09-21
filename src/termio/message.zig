@@ -68,6 +68,10 @@ pub const Message = union(enum) {
     /// surface thread doesn't have access to an event loop from libghostty.
     selection_scroll: bool,
 
+    /// Discrete-wheel and page/line velocity slide. Same ping/pong
+    /// as `selection_scroll`.
+    scroll_slide: bool,
+
     /// Jump forward/backward n prompts.
     jump_to_prompt: isize,
 

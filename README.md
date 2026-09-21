@@ -8,7 +8,8 @@
 >   ([#14112](https://github.com/ghostty-org/ghostty/pull/14112))
 > - Instanced cell backgrounds. Default-bg cells are skipped.
 >   ([#14053](https://github.com/ghostty-org/ghostty/pull/14053))
-> - Fractional scroll row offset and 1:1 precise pixel scroll.
+> - Fractional scroll row offset, 1:1 precise pan, and velocity
+>   slides for discrete wheel and page keys.
 >   ([#14210](https://github.com/ghostty-org/ghostty/pull/14210))
 > - Packed glyph and codepoint cache keys, 512-slot renderer caches,
 >   nerd-font skip-page, and BMP CoreText append.

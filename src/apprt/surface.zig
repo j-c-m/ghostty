@@ -127,6 +127,10 @@ pub const Message = union(enum) {
     /// the viewport to follow the mouse cursor.
     selection_scroll_tick: bool,
 
+    /// A tick of the timer driving a discrete-wheel or page/line
+    /// velocity slide.
+    scroll_slide_tick: bool,
+
     /// The terminal has reported a change in the working directory.
     pwd_change: WriteReq,
 

@@ -244,6 +244,9 @@ const Mouse = struct {
     pending_scroll_x: f64 = 0,
     pending_scroll_y: f64 = 0,
 
+    /// Live velocity slide toward a visual row offset.
+    scroll_slide: ?ScrollSlide = null,
+
     /// True if the mouse is hidden
     hidden: bool = false,
 
@@ -258,6 +261,14 @@ const Mouse = struct {
     fn activeLeftClickPin(self: *const Mouse, screens: *const terminal.ScreenSet) ?*terminal.Pin {
         return self.selection_gesture.validatedLeftClickPin(screens);
     }
+};
+
+/// Rows per second for discrete-wheel and page/line slides.
+const scroll_slide_rows_per_s: f64 = 240;
+
+const ScrollSlide = struct {
+    to: f64,
+    last: std.Io.Timestamp,
 };
 
 /// Keyboard state for the surface.
@@ -1133,6 +1144,14 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         .selection_scroll_tick => |active| {
             self.selection_scroll_active = active;
             try self.selectionScrollTick();
+        },
+
+        .scroll_slide_tick => |active| {
+            if (!active) {
+                self.mouse.scroll_slide = null;
+                return;
+            }
+            try self.scrollSlideTick();
         },
 
         .start_command => {
@@ -2876,7 +2895,10 @@ pub fn keyCallback(
             try self.setSelection(null);
         }
 
-        if (self.config.scroll_to_bottom.keystroke) self.io.terminal.scrollViewport(.bottom);
+        if (self.config.scroll_to_bottom.keystroke) {
+            self.cancelScrollSlide(.locked);
+            self.io.terminal.scrollViewport(.bottom);
+        }
 
         try self.queueRender();
     }
@@ -3604,6 +3626,7 @@ pub fn scrollCallback(
         // (1) alt screen (2) no explicit mouse reporting and (3) alt
         // scroll mode enabled.
         if (alt_scroll) {
+            self.cancelScrollSlide(.locked);
             if (y.delta != 0) {
                 // When we send mouse events as cursor keys we always
                 // clear the selection.
@@ -3636,6 +3659,7 @@ pub fn scrollCallback(
 
         // If we're scrolling up or down, then send a mouse event.
         if (reporting) {
+            self.cancelScrollSlide(.locked);
             for (0..@abs(y.delta)) |_| {
                 const pos = try self.rt_surface.getCursorPos();
                 self.mouseReport(switch (y.direction()) {
@@ -3664,19 +3688,144 @@ pub fn scrollCallback(
             // Y pending is not flushed. Ignore and clear pending rather
             // than folding report/alt-scroll remainder into delta_f.
             if (yoff != 0) {
+                self.cancelScrollSlide(.locked);
                 self.mouse.pending_scroll_y = 0;
                 self.io.terminal.scrollViewport(.{
                     .delta_f = -(yoff_adjusted / cell_size),
                 });
             }
         } else if (y.delta != 0) {
-            // Modify our viewport, this requires a lock since it affects
-            // rendering. We have to switch signs here because our delta
-            // is negative down but our viewport is positive down.
-            self.io.terminal.scrollViewport(.{ .delta = y.delta * -1 });
+            // Discrete notches slide at constant velocity instead of
+            // jumping. Sign flip matches the integer viewport path.
+            self.addScrollSlide(@floatFromInt(y.delta * -1));
         }
     }
 
+    try self.queueRender();
+}
+
+fn scrollVisualOffset(self: *Surface) f64 {
+    const sb = self.io.terminal.screens.active.pages.scrollbar();
+    return @as(f64, @floatFromInt(sb.offset)) + self.io.terminal.scrollRowFrac();
+}
+
+fn scrollMaxOffset(self: *Surface) f64 {
+    const sb = self.io.terminal.screens.active.pages.scrollbar();
+    return @floatFromInt(sb.total -| sb.len);
+}
+
+/// Animate a discrete-wheel notch or key page/line delta at constant
+/// velocity. Same-direction deltas extend the target; reverse starts
+/// from the current offset.
+fn addScrollSlide(self: *Surface, delta_rows: f64) void {
+    if (delta_rows == 0) return;
+
+    const cur = self.scrollVisualOffset();
+    const max_off = self.scrollMaxOffset();
+    const dest = dest: {
+        if (self.mouse.scroll_slide) |slide| {
+            const remaining = slide.to - cur;
+            const same_dir = remaining * delta_rows >= 0;
+            break :dest std.math.clamp(
+                if (same_dir) slide.to + delta_rows else cur + delta_rows,
+                0,
+                max_off,
+            );
+        }
+        break :dest std.math.clamp(cur + delta_rows, 0, max_off);
+    };
+    if (dest == cur) {
+        self.cancelScrollSlide(.locked);
+        return;
+    }
+
+    if (self.mouse.scroll_slide != null) {
+        self.mouse.scroll_slide.?.to = dest;
+        return;
+    }
+    self.mouse.scroll_slide = .{
+        .to = dest,
+        .last = .now(global.io(), .awake),
+    };
+    self.queueIo(.{ .scroll_slide = true }, .locked);
+}
+
+fn cancelScrollSlide(self: *Surface, mutex: termio.Termio.MutexState) void {
+    if (self.mouse.scroll_slide == null) return;
+    self.mouse.scroll_slide = null;
+    self.queueIo(.{ .scroll_slide = false }, mutex);
+}
+
+/// Stop a live slide. If less than a row remains, finish to the
+/// target. Otherwise row-align the painted cell so hit-testing
+/// matches what is on screen.
+fn finishScrollSlide(self: *Surface) bool {
+    const slide = self.mouse.scroll_slide orelse return false;
+    self.cancelScrollSlide(.locked);
+    const cur = self.scrollVisualOffset();
+    const remaining = slide.to - cur;
+    if (remaining == 0) return false;
+    if (@abs(remaining) < 1) {
+        self.io.terminal.scrollViewport(.{ .delta_f = remaining });
+        return true;
+    }
+    const frac = self.io.terminal.scrollRowFrac();
+    if (frac == 0) return false;
+    if (remaining > 0) {
+        self.io.terminal.scrollViewport(.{ .delta_f = 1 - frac });
+    } else {
+        self.io.terminal.setScrollRowFrac(0);
+    }
+    return true;
+}
+
+fn scrollSlideTick(self: *Surface) !void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+
+    const slide = self.mouse.scroll_slide orelse {
+        self.queueIo(.{ .scroll_slide = false }, .locked);
+        return;
+    };
+    const t = &self.io.terminal;
+    const cur = self.scrollVisualOffset();
+    const dest = std.math.clamp(slide.to, 0, self.scrollMaxOffset());
+    if (cur == dest) {
+        self.mouse.scroll_slide = null;
+        self.queueIo(.{ .scroll_slide = false }, .locked);
+        return;
+    }
+
+    const now: std.Io.Timestamp = .now(global.io(), .awake);
+    const dt_ns: u64 = @intCast(@max(slide.last.durationTo(now).nanoseconds, 0));
+    self.mouse.scroll_slide.?.last = now;
+    const dt = @as(f64, @floatFromInt(dt_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
+    const remaining = dest - cur;
+    const step_mag = scroll_slide_rows_per_s * dt;
+    const step = if (step_mag >= @abs(remaining))
+        remaining
+    else
+        std.math.copysign(step_mag, remaining);
+    t.scrollViewport(.{ .delta_f = step });
+    if (step == remaining) {
+        self.mouse.scroll_slide = null;
+        self.queueIo(.{ .scroll_slide = false }, .locked);
+    }
+    try self.queueRender();
+}
+
+fn cancelLiveScroll(self: *Surface) void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    self.cancelScrollSlide(.locked);
+}
+
+fn slideKeyScroll(self: *Surface, delta_rows: f64) !void {
+    {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        self.addScrollSlide(delta_rows);
+    }
     try self.queueRender();
 }
 
@@ -3860,6 +4009,18 @@ pub fn mouseButtonCallback(
 
     // Update our modifiers if they changed
     self.modsChanged(mods);
+
+    // Row-align a live velocity slide before hit-testing so the
+    // press lands on the painted cell.
+    if (action == .press) {
+        var snapped = false;
+        {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+            snapped = self.finishScrollSlide();
+        }
+        if (snapped) try self.queueRender();
+    }
 
     // This is set to true if the terminal is allowed to capture the shift
     // modifier. Note we can do this more efficiently probably with less
@@ -4807,6 +4968,7 @@ pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordin
 ///
 /// Precondition: the render_state mutex must be held.
 fn scrollToBottom(self: *Surface) !void {
+    self.cancelScrollSlide(.locked);
     self.io.terminal.scrollViewport(.{ .bottom = {} });
     try self.queueRender();
 }
@@ -5270,12 +5432,14 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .scroll_to_top => {
+            self.cancelLiveScroll();
             self.queueIo(.{
                 .scroll_viewport = .{ .top = {} },
             }, .unlocked);
         },
 
         .scroll_to_bottom => {
+            self.cancelLiveScroll();
             self.queueIo(.{
                 .scroll_viewport = .{ .bottom = {} },
             }, .unlocked);
@@ -5285,6 +5449,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             {
                 self.renderer_state.mutex.lockUncancelable(global.io());
                 defer self.renderer_state.mutex.unlock(global.io());
+                self.cancelScrollSlide(.locked);
                 const t: *terminal.Terminal = self.renderer_state.terminal;
                 t.screens.active.scroll(.{ .row = n });
             }
@@ -5297,6 +5462,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 self.renderer_state.mutex.lockUncancelable(global.io());
                 defer self.renderer_state.mutex.unlock(global.io());
                 const sel = self.io.terminal.screens.active.selection orelse return false;
+                self.cancelScrollSlide(.locked);
                 const tl = sel.topLeft(self.io.terminal.screens.active);
                 self.io.terminal.screens.active.scroll(.{ .pin = tl });
             }
@@ -5305,34 +5471,27 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .scroll_page_up => {
-            const rows: isize = @intCast(self.size.grid().rows);
-            self.queueIo(.{
-                .scroll_viewport = .{ .delta = -1 * rows },
-            }, .unlocked);
+            const rows: f64 = @floatFromInt(self.size.grid().rows);
+            try self.slideKeyScroll(-rows);
         },
 
         .scroll_page_down => {
-            const rows: isize = @intCast(self.size.grid().rows);
-            self.queueIo(.{
-                .scroll_viewport = .{ .delta = rows },
-            }, .unlocked);
+            const rows: f64 = @floatFromInt(self.size.grid().rows);
+            try self.slideKeyScroll(rows);
         },
 
         .scroll_page_fractional => |fraction| {
             const rows: f32 = @floatFromInt(self.size.grid().rows);
             const delta: isize = @intFromFloat(@trunc(fraction * rows));
-            self.queueIo(.{
-                .scroll_viewport = .{ .delta = delta },
-            }, .unlocked);
+            try self.slideKeyScroll(@floatFromInt(delta));
         },
 
         .scroll_page_lines => |lines| {
-            self.queueIo(.{
-                .scroll_viewport = .{ .delta = lines },
-            }, .unlocked);
+            try self.slideKeyScroll(@floatFromInt(lines));
         },
 
         .jump_to_prompt => |delta| {
+            self.cancelLiveScroll();
             self.queueIo(.{
                 .jump_to_prompt = @intCast(delta),
             }, .unlocked);
@@ -5712,6 +5871,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 else
                     sel.end().up(screen.pages.rows - 1) orelse sel.end();
 
+                self.cancelScrollSlide(.locked);
                 screen.scroll(.{ .pin = target });
             }
 

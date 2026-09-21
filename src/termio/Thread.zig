@@ -40,6 +40,9 @@ const sync_reset_ms = 1000;
 /// The number of milliseconds between each movement during selection scrolling.
 const selection_scroll_ms = 15;
 
+/// Cadence for discrete-wheel and page/line velocity slides.
+const scroll_slide_ms = 8;
+
 /// Allocator used for some state
 alloc: std.mem.Allocator,
 
@@ -60,6 +63,11 @@ stop_c: xev.Completion = .{},
 scroll: xev.Timer,
 scroll_c: xev.Completion = .{},
 scroll_active: bool = false,
+
+/// This is used for discrete-wheel and page/line velocity slides.
+slide: xev.Timer,
+slide_c: xev.Completion = .{},
+slide_active: bool = false,
 
 /// This is used to coalesce resize events.
 coalesce: xev.Timer,
@@ -104,6 +112,10 @@ pub fn init(
     var scroll_h = try xev.Timer.init();
     errdefer scroll_h.deinit();
 
+    // This timer is used for discrete-wheel and page/line velocity slides.
+    var slide_h = try xev.Timer.init();
+    errdefer slide_h.deinit();
+
     // This timer is used to coalesce resize events.
     var coalesce_h = try xev.Timer.init();
     errdefer coalesce_h.deinit();
@@ -117,6 +129,7 @@ pub fn init(
         .loop = loop,
         .stop = stop_h,
         .scroll = scroll_h,
+        .slide = slide_h,
         .coalesce = coalesce_h,
         .sync_reset = sync_reset_h,
     };
@@ -126,6 +139,7 @@ pub fn init(
 /// completes executing; the caller must join prior to this.
 pub fn deinit(self: *Thread) void {
     self.scroll.deinit();
+    self.slide.deinit();
     self.coalesce.deinit();
     self.sync_reset.deinit();
     self.stop.deinit();
@@ -335,6 +349,13 @@ fn drainMailbox(
                     self.stopScrollTimer();
                 }
             },
+            .scroll_slide => |v| {
+                if (v) {
+                    self.startSlideTimer(cb);
+                } else {
+                    self.stopSlideTimer();
+                }
+            },
             .jump_to_prompt => |v| try io.jumpToPrompt(v),
             .kitty_clipboard_grant_read => |v| {
                 defer v.alloc.free(v.pw);
@@ -539,6 +560,60 @@ fn selectionScrollCallback(
         CallbackData,
         cb,
         selectionScrollCallback,
+    );
+
+    return .disarm;
+}
+
+fn startSlideTimer(self: *Thread, cb: *CallbackData) void {
+    self.slide_active = true;
+
+    switch (self.slide_c.state()) {
+        .active => return,
+        .dead => self.slide.run(
+            &self.loop,
+            &self.slide_c,
+            scroll_slide_ms,
+            CallbackData,
+            cb,
+            slideCallback,
+        ),
+    }
+}
+
+fn stopSlideTimer(self: *Thread) void {
+    self.slide_active = false;
+}
+
+fn slideCallback(
+    cb_: ?*CallbackData,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = r catch |err| switch (err) {
+        error.Canceled => {},
+        else => {
+            log.warn("error during scroll slide callback err={}", .{err});
+            return .disarm;
+        },
+    };
+
+    const cb = cb_ orelse return .disarm;
+    const self = cb.self;
+
+    _ = cb.io.surface_mailbox.push(
+        .{ .scroll_slide_tick = self.slide_active },
+        .{ .instant = {} },
+    );
+
+    if (self.slide_active) self.slide.run(
+        &self.loop,
+        &self.slide_c,
+        scroll_slide_ms,
+        CallbackData,
+        cb,
+        slideCallback,
     );
 
     return .disarm;

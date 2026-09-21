@@ -1,18 +1,25 @@
 > This is my daily driver
 > [Ghostty](https://github.com/ghostty-org/ghostty), until these patches
-> are upstreamed. Performance and efficiency enhancements, plus
-> fractional 1:1 scrollback. Local patches over `main`:
+> are upstreamed. Against current `main`, Time Profiler at 120×40
+> shows the paint path doing less work per frame: cmatrix renderer
+> samples 20.5k → 16.1k, Debug DOOM-fire 17.6k → 9.1k (773 → 785 fps).
+> Mixing the run-cache key instead of Wyhash, measured on this
+> branch, takes fire renderer samples 9.2k → 8.4k and cuts that
+> per-cell hash about in half. Fire fps does not move further.
 >
 > - macOS OSC 9;4 progress is a 2px layer sibling. Indeterminate is an
 >   opacity pulse, not a bouncing overlay on Metal.
 >   ([#14112](https://github.com/ghostty-org/ghostty/pull/14112))
-> - Instanced cell backgrounds. Default-bg cells are skipped.
+> - Instanced cell backgrounds. Default-bg cells are skipped, so a
+>   flat window does not blend a quad per cell.
 >   ([#14053](https://github.com/ghostty-org/ghostty/pull/14053))
 > - Fractional scroll row offset, 1:1 precise pan, and velocity
 >   slides for discrete wheel and page keys.
 >   ([#14210](https://github.com/ghostty-org/ghostty/pull/14210))
-> - Packed glyph and codepoint cache keys, 512-slot renderer caches,
->   nerd-font skip-page, and BMP CoreText append.
+> - Packed 8-byte glyph and codepoint keys, 512-slot glyph and
+>   getIndex caches (no `SharedGrid` lock on the hit path),
+>   nerd-font skip-page, BMP CoreText append, and a SplitMix64
+>   run-cache key.
 >   ([#14300](https://github.com/ghostty-org/ghostty/pull/14300),
 >   [#14301](https://github.com/ghostty-org/ghostty/pull/14301),
 >   [#14311](https://github.com/ghostty-org/ghostty/pull/14311),

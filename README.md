@@ -1,3 +1,24 @@
+> This is my daily driver
+> [Ghostty](https://github.com/ghostty-org/ghostty), until these patches
+> are upstreamed. Performance and efficiency enhancements, plus
+> fractional 1:1 scrollback. Local patches over `main`:
+>
+> - macOS OSC 9;4 progress is a 2px layer sibling. Indeterminate is an
+>   opacity pulse, not a bouncing overlay on Metal.
+>   ([#14112](https://github.com/ghostty-org/ghostty/pull/14112))
+> - Instanced cell backgrounds. Default-bg cells are skipped.
+>   ([#14053](https://github.com/ghostty-org/ghostty/pull/14053))
+> - Fractional scroll row offset and 1:1 precise pixel scroll.
+>   ([#14210](https://github.com/ghostty-org/ghostty/pull/14210))
+> - Packed glyph and codepoint cache keys, 512-slot renderer caches,
+>   nerd-font skip-page, and BMP CoreText append.
+>   ([#14300](https://github.com/ghostty-org/ghostty/pull/14300),
+>   [#14301](https://github.com/ghostty-org/ghostty/pull/14301),
+>   [#14311](https://github.com/ghostty-org/ghostty/pull/14311),
+>   [#14312](https://github.com/ghostty-org/ghostty/pull/14312),
+>   [#14306](https://github.com/ghostty-org/ghostty/pull/14306),
+>   [#14309](https://github.com/ghostty-org/ghostty/pull/14309))
+
 <!-- LOGO -->
 <h1>
 <p align="center">
